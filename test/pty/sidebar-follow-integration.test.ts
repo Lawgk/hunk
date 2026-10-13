@@ -27,6 +27,61 @@ function sidebarLists(text: string, file: string) {
 }
 
 describe("PTY sidebar selection follow", () => {
+  test("resizing keeps a deep selection visible without capturing ordinary sidebar scrolling", async () => {
+    const fixture = harness.createManyFileSidebarRepoFixture(60);
+    const session = await harness.launchHunk({
+      args: ["diff", "--mode", "split", "--sidebar"],
+      cwd: fixture.dir,
+      cols: 100,
+      rows: 24,
+    });
+
+    try {
+      await session.waitForText(/View\s+Navigate\s+Agent\s+Help/, { timeout: 15_000 });
+      session.writeRaw(".".repeat(50));
+      await harness.waitForSnapshot(
+        session,
+        (text) => selectedSidebarFile(text) === "file-50.ts",
+        5_000,
+      );
+
+      for (const dimensions of [
+        { cols: 160, rows: 32 },
+        { cols: 100, rows: 24 },
+        { cols: 100, rows: 18 },
+      ]) {
+        session.resize(dimensions);
+        // A frame captured before the resize still contains the selected row; wait for redraw.
+        await Bun.sleep(250);
+        await harness.waitForSnapshot(
+          session,
+          (text) => selectedSidebarFile(text) === "file-50.ts" && text.includes("file50 = 150"),
+          5_000,
+        );
+      }
+
+      // Wheel events inside the sidebar may move away from the selected row without a snap-back.
+      session.writeRaw("\u001b[<64;5;8M".repeat(12));
+      await harness.waitForSnapshot(
+        session,
+        (text) => selectedSidebarFile(text) === null && sidebarLists(text, "file-30.ts"),
+        5_000,
+      );
+      await Bun.sleep(250);
+      expect(selectedSidebarFile(await session.text({ immediate: true }))).toBeNull();
+
+      session.resize({ cols: 100, rows: 24 });
+      await Bun.sleep(250);
+      await harness.waitForSnapshot(
+        session,
+        (text) => selectedSidebarFile(text) === "file-50.ts",
+        5_000,
+      );
+    } finally {
+      session.close();
+    }
+  });
+
   test("a burst of next-file presses keeps the selected file inside the sidebar viewport", async () => {
     // Held-down `.` delivers key repeats faster than the renderer paints frames. The sidebar
     // must keep the selected row on screen even when several selections land between two

@@ -2,4 +2,4 @@
 "hunkdiff": patch
 ---
 
-Keep the selected file visible in the sidebar while holding down next-file or previous-file navigation, instead of snapping the list back to the top.
+Keep the selected file visible in the sidebar during held next-file or previous-file navigation and terminal resizing without snapping ordinary manual scrolling back to the selection.

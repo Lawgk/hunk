@@ -136,7 +136,7 @@ export function VirtualizedFileSidebarRows({
  * projection and the collapsible tree as the pane width changes.
  *
  * Resizing only replaces the rows inside one stable scrollbox. File navigation, a
- * projection change, and a reload all reveal the selected row through the same
+ * projection change, a measured viewport resize, and a reload reveal the selected row through the same
  * fixed-row geometry the render window uses, so the reveal never depends on a row
  * having been laid out: rows mounted since the last frame carry no position yet, and
  * held-down navigation lands several commits between frames.
@@ -150,6 +150,9 @@ export function FlexFileSidebar({
 }: BuiltInSidebarProps): ReactNode {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
   const previousSelectedFileIdRef = useRef(selectedFileId);
+  const selectedFileIdRef = useRef(selectedFileId);
+  selectedFileIdRef.current = selectedFileId;
+  const measuredViewportHeightRef = useRef(0);
   const skipSelectedFileRevealRef = useRef(false);
   // The file whose row still has to be brought on screen. It stays set until a measured
   // viewport confirms the row is visible, so a reveal that ran before the first layout or
@@ -254,6 +257,13 @@ export function FlexFileSidebar({
     const readViewport = () => {
       const nextTop = scrollBox.scrollTop ?? 0;
       const nextHeight = scrollBox.viewport.height ?? 0;
+      // Resizing can hide a row whose navigation reveal already completed. Rearm only
+      // for measured height changes, so ordinary wheel scrolling stays independent.
+      if (nextHeight > 0 && nextHeight !== measuredViewportHeightRef.current) {
+        pendingRevealFileIdRef.current = selectedFileIdRef.current ?? null;
+      }
+      measuredViewportHeightRef.current = nextHeight;
+
       setScrollViewport((current) =>
         current.top === nextTop && current.height === nextHeight
           ? current

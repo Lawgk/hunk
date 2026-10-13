@@ -36,6 +36,7 @@ const SidebarSelectionHarness = forwardRef<SidebarSelectionHandle, { initialFile
         files={files}
         selectedFileId={selectedFileId}
         selectedHunkIndex={0}
+        reviewGeneration="test-review"
         theme={resolveTheme("github-dark-default", null)}
         width={30}
         keybindings={{ matches: () => false, getKeys: () => [] }}
@@ -45,6 +46,8 @@ const SidebarSelectionHarness = forwardRef<SidebarSelectionHandle, { initialFile
           selectHunk: () => {},
           revealLine: () => {},
           notify: () => {},
+          setPresentationScope: () => false,
+          clearPresentationScope: () => {},
         }}
       />
     );
@@ -56,6 +59,7 @@ function selectedRow(frame: string) {
   return frame.split("\n").find((line) => line.includes("▌"));
 }
 
+/** Mount a sidebar with controllable selection, viewport and mouse input. */
 async function renderSidebar(initialFileId: string) {
   const handle: { current: SidebarSelectionHandle | null } = { current: null };
   const setup = await testRender(
@@ -93,13 +97,29 @@ async function renderSidebar(initialFileId: string) {
     return setup.captureCharFrame();
   };
 
+  /** Resize the measured viewport and let its layout notifications settle. */
+  const resize = async (height: number) => {
+    await act(async () => {
+      setup.resize(36, height);
+      await setup.renderOnce();
+    });
+  };
+
+  /** Move the sidebar without changing the review selection. */
+  const scrollUp = async () => {
+    await act(async () => {
+      await setup.mockMouse.scroll(4, 2, "up");
+      await setup.renderOnce();
+    });
+  };
+
   const destroy = async () => {
     await act(async () => {
       setup.renderer.destroy();
     });
   };
 
-  return { selectWithoutFrame, selectAndSettle, frame, destroy };
+  return { selectWithoutFrame, selectAndSettle, frame, resize, scrollUp, destroy };
 }
 
 describe("FlexFileSidebar selected-row reveal", () => {
@@ -160,6 +180,37 @@ describe("FlexFileSidebar selected-row reveal", () => {
     try {
       const frame = await sidebar.frame();
       expect(selectedRow(frame)).toContain(`${fileId(25)}.ts`);
+    } finally {
+      await sidebar.destroy();
+    }
+  });
+
+  test("keeps the selection visible after expanding and shrinking the viewport", async () => {
+    const sidebar = await renderSidebar(fileId(25));
+    try {
+      expect(selectedRow(await sidebar.frame())).toContain(`${fileId(25)}.ts`);
+      await sidebar.resize(16);
+      expect(selectedRow(await sidebar.frame())).toContain(`${fileId(25)}.ts`);
+      await sidebar.resize(6);
+      expect(selectedRow(await sidebar.frame())).toContain(`${fileId(25)}.ts`);
+      await sidebar.resize(FRAME_ROWS);
+      expect(selectedRow(await sidebar.frame())).toContain(`${fileId(25)}.ts`);
+    } finally {
+      await sidebar.destroy();
+    }
+  });
+
+  test("allows manual scrolling away from the selection until the viewport resizes", async () => {
+    const sidebar = await renderSidebar(fileId(25));
+    try {
+      expect(selectedRow(await sidebar.frame())).toContain(`${fileId(25)}.ts`);
+      for (let index = 0; index < 12; index += 1) {
+        await sidebar.scrollUp();
+      }
+      expect(selectedRow(await sidebar.frame())).toBeUndefined();
+      expect(selectedRow(await sidebar.frame())).toBeUndefined();
+      await sidebar.resize(6);
+      expect(selectedRow(await sidebar.frame())).toContain(`${fileId(25)}.ts`);
     } finally {
       await sidebar.destroy();
     }
