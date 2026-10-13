@@ -2,12 +2,14 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { dlopen, FFIType, ptr, type Library } from "bun:ffi";
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, read, readdirSync, readFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { createPtyHarness } from "./harness";
 
 const harness = createPtyHarness();
 
-setDefaultTimeout(30_000);
+// The broker-suspension test deliberately stays suspended past the daemon's stale-session TTL.
+setDefaultTimeout(120_000);
 
 afterEach(() => {
   harness.cleanup();
@@ -57,33 +59,126 @@ async function waitForExitCode(path: string, timeoutMs = 2_000) {
   throw new Error(`Timed out waiting for an exit code in ${path}.`);
 }
 
-async function stopDaemonsUnder(runtimeDir: string) {
+/** Stop broker daemons already launched by an exited app in its isolated runtime. */
+function stopDaemonsUnder(runtimeDir: string) {
   const daemonDir = join(runtimeDir, "hunk-mcp");
-  const deadline = Date.now() + 2_000;
+  if (!existsSync(daemonDir)) return;
 
-  while (Date.now() < deadline) {
-    if (existsSync(daemonDir)) {
-      const metadataFiles = readdirSync(daemonDir).filter(
-        (entry) => entry.startsWith("daemon-") && entry.endsWith(".json"),
-      );
-      if (metadataFiles.length > 0) {
-        for (const entry of metadataFiles) {
-          try {
-            const { pid } = JSON.parse(readFileSync(join(daemonDir, entry), "utf8")) as {
-              pid?: number;
-            };
-            if (pid && pid > 0) {
-              process.kill(pid, "SIGTERM");
-            }
-          } catch {
-            // Partially written metadata, or a daemon that already exited.
-          }
-        }
+  const metadataFiles = readdirSync(daemonDir).filter(
+    (entry) => entry.startsWith("daemon-") && entry.endsWith(".json"),
+  );
+  for (const entry of metadataFiles) {
+    try {
+      const { pid } = JSON.parse(readFileSync(join(daemonDir, entry), "utf8")) as {
+        pid?: number;
+      };
+      if (pid && pid > 0) {
+        process.kill(pid, "SIGTERM");
+      }
+    } catch {
+      // Ignore partially written metadata, or a daemon that already exited.
+    }
+  }
+}
+
+/** Reserve a loopback port so the suspension test never uses an existing daemon. */
+async function reserveLifecycleTestPort(): Promise<number> {
+  const listener = createServer();
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", () => resolve());
+  });
+
+  const address = listener.address();
+  await new Promise<void>((resolve, reject) => {
+    listener.close((error) => (error ? reject(error) : resolve()));
+  });
+
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to reserve a loopback port for the suspension test.");
+  }
+
+  return address.port;
+}
+
+/** List sessions on the test daemon and report CLI failures with their captured output. */
+function listSessionsViaCli(
+  cwd: string,
+  runtimeDir: string,
+  port: number,
+  timeoutMs = 10_000,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ["run", join(process.cwd(), "packages", "hunk", "src", "main.tsx"), "session", "list"],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          XDG_RUNTIME_DIR: runtimeDir,
+          XDG_CONFIG_HOME: runtimeDir,
+          HUNK_MCP_HOST: "127.0.0.1",
+          HUNK_MCP_PORT: String(port),
+          TERM: "xterm-256color",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let out = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`hunk session list timed out.\nstdout: ${out}\nstderr: ${stderr}`));
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      out += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    // Wait for close so both output streams are drained before checking the exit status.
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(
+          new Error(
+            `hunk session list failed (code=${code}, signal=${signal}).\nstdout: ${out}\nstderr: ${stderr}`,
+          ),
+        );
         return;
       }
+
+      resolve(out);
+    });
+  });
+}
+
+/** Wait for asynchronous producer registration without delaying the post-suspension checks. */
+async function waitForLifecycleTestSession(cwd: string, runtimeDir: string, port: number) {
+  const deadline = Date.now() + 15_000;
+  let lastOutput = "";
+
+  while (Date.now() < deadline) {
+    lastOutput = await listSessionsViaCli(
+      cwd,
+      runtimeDir,
+      port,
+      Math.min(10_000, deadline - Date.now()),
+    );
+    if (/before\.txt.*after\.txt/.test(lastOutput)) {
+      return;
     }
-    await Bun.sleep(25);
+
+    await Bun.sleep(100);
   }
+
+  throw new Error(`Timed out waiting for the suspension test session.\n${lastOutput}`);
 }
 
 function revokeTerminal(path: string) {
@@ -178,6 +273,22 @@ async function waitForPtyOutput(fd: number, pattern: RegExp, timeoutMs = 20_000)
   throw new Error(`Timed out waiting for ${pattern} on the PTY. Saw:\n${text}`);
 }
 
+/**
+ * Keep reading the PTY until it closes. A PTY buffers little output, so once the test stops
+ * reading, Hunk's teardown writes fill it and block, and Hunk never exits.
+ */
+function drainPty(fd: number) {
+  const buffer = Buffer.alloc(64 * 1024);
+  const next = () => {
+    read(fd, buffer, 0, buffer.length, null, (error, bytesRead) => {
+      if (!error && bytesRead > 0) {
+        next();
+      }
+    });
+  };
+  next();
+}
+
 describe("PTY lifecycle", () => {
   test.skipIf(process.platform === "win32")(
     "restores a directly launched renderer when SIGTSTP is discarded",
@@ -227,8 +338,7 @@ describe("PTY lifecycle", () => {
         session.writeRaw(`${hunkCommand}\r`);
         await session.waitForText(/before\.txt.*after\.txt/, { timeout: 15_000 });
         await harness.ensureKeyboardIsLive(session);
-        await session.press("c");
-        await session.waitForText(/Draft note/, { timeout: 5_000 });
+        await harness.pressAndWaitForText(session, "c", /Draft note/, { timeout: 5_000 });
         await session.type("Keep this note after resume.");
         await session.press(["ctrl", "s"]);
         await session.waitForText(/Keep this note after resume\./, { timeout: 5_000 });
@@ -259,6 +369,68 @@ describe("PTY lifecycle", () => {
         expect(secondResume).toContain("Keep this note after resume.");
       } finally {
         session.close();
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "keeps the broker session alive across a suspension longer than the stale TTL",
+    async () => {
+      const fixture = harness.createTabbedFilePair();
+      const hunkCommand = harness.buildHunkCommand([
+        "diff",
+        "--files",
+        fixture.before,
+        fixture.after,
+      ]);
+      const runtimeDir = harness.createIsolatedConfigHome();
+      const port = await reserveLifecycleTestPort();
+      const session = await harness.launchShellCommand({
+        command: "exec /bin/bash --noprofile --norc -i",
+        cwd: fixture.dir,
+        env: {
+          XDG_RUNTIME_DIR: runtimeDir,
+          XDG_CONFIG_HOME: runtimeDir,
+          HUNK_MCP_HOST: "127.0.0.1",
+          HUNK_MCP_PORT: String(port),
+          HUNK_MCP_DISABLE: "0",
+        },
+      });
+
+      try {
+        session.writeRaw("PS1='HUNK_SHELL> '\r");
+        await session.waitForText(/HUNK_SHELL>/, { timeout: 5_000 });
+        session.writeRaw(`${hunkCommand}\r`);
+        await session.waitForText(/before\.txt.*after\.txt/, { timeout: 15_000 });
+
+        // Registration runs asynchronously after the first frame; wait before suspending it.
+        await waitForLifecycleTestSession(fixture.dir, runtimeDir, port);
+
+        session.writeRaw("\x1a");
+        await session.waitForText(/\[\d+\][^\n]*(?:Stopped|suspended)/, { timeout: 5_000 });
+
+        // Stay suspended past the daemon's 45s stale-session TTL plus a sweep.
+        await Bun.sleep(62_000);
+        session.writeRaw("echo SUSPENSION_DONE\r");
+        await session.waitForText(/SUSPENSION_DONE/, { timeout: 5_000 });
+
+        // The suspended producer's transport stays connected, so the broker must keep the
+        // session registered instead of pruning it after the stale TTL.
+        const whileSuspended = await listSessionsViaCli(fixture.dir, runtimeDir, port);
+        expect(whileSuspended).toMatch(/before\.txt.*after\.txt/);
+
+        session.writeRaw("fg\r");
+        await Bun.sleep(2_000);
+        expect(await session.text({ immediate: true })).toMatch(/before\.txt.*after\.txt/);
+        await harness.ensureKeyboardIsLive(session);
+
+        // With the session never pruned, the resumed app is listed immediately, without the
+        // reconnect-delay recovery gap a pruned session would need.
+        const afterResume = await listSessionsViaCli(fixture.dir, runtimeDir, port);
+        expect(afterResume).toMatch(/before\.txt.*after\.txt/);
+      } finally {
+        session.close();
+        stopDaemonsUnder(runtimeDir);
       }
     },
   );
@@ -300,13 +472,14 @@ describe("PTY lifecycle", () => {
 
       try {
         await waitForPtyOutput(master, /this is a very long wrapped line/);
+        drainPty(master);
         process.kill(child.pid!, signal);
 
         await expect(waitForChildExit(child)).resolves.toEqual({ code: 0, signal: null });
       } finally {
         closeMaster();
         await stopChild(child);
-        await stopDaemonsUnder(runtimeDir);
+        stopDaemonsUnder(runtimeDir);
       }
     });
   }

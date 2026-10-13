@@ -9,6 +9,7 @@ import {
   resolveCanonicalPath,
   resolveGlobalConfigPath,
   resolveAppStatePath,
+  resolveGlobalExtensionsDir,
 } from "./paths";
 
 function createTempRoot(prefix: string) {
@@ -17,10 +18,32 @@ function createTempRoot(prefix: string) {
 
 describe("paths", () => {
   test("resolves XDG config and state paths", () => {
-    const env = { XDG_CONFIG_HOME: join("/tmp", "xdg-home") } as NodeJS.ProcessEnv;
+    const env = {
+      XDG_CONFIG_HOME: join(tmpdir(), "xdg-config"),
+      XDG_STATE_HOME: join(tmpdir(), "xdg-state"),
+    } as NodeJS.ProcessEnv;
 
-    expect(resolveGlobalConfigPath(env)).toBe(join("/tmp", "xdg-home", "hunk", "config.toml"));
-    expect(resolveAppStatePath(env)).toBe(join("/tmp", "xdg-home", "hunk", "state.json"));
+    expect(resolveGlobalConfigPath(env)).toBe(join(tmpdir(), "xdg-config", "hunk", "config.toml"));
+    expect(resolveAppStatePath(env)).toBe(join(tmpdir(), "xdg-state", "hunk", "state.json"));
+    expect(resolveGlobalExtensionsDir(env)).toBe(
+      join(tmpdir(), "xdg-config", "hunk", "extensions"),
+    );
+  });
+
+  test("falls back to XDG state while keeping extensions in the config directory", () => {
+    const env = { HOME: join(tmpdir(), "home") } as NodeJS.ProcessEnv;
+
+    expect(resolveAppStatePath(env)).toBe(join(env.HOME!, ".local", "state", "hunk", "state.json"));
+    expect(resolveGlobalExtensionsDir(env)).toBe(join(env.HOME!, ".config", "hunk", "extensions"));
+  });
+
+  test("ignores a relative XDG_STATE_HOME", () => {
+    const env = {
+      HOME: join(tmpdir(), "home"),
+      XDG_STATE_HOME: join("relative", "state"),
+    } as NodeJS.ProcessEnv;
+
+    expect(resolveAppStatePath(env)).toBe(join(env.HOME!, ".local", "state", "hunk", "state.json"));
   });
 
   test("falls back to HOME for config and state paths", () => {
@@ -29,7 +52,9 @@ describe("paths", () => {
     expect(resolveGlobalConfigPath(env)).toBe(
       join("/tmp", "home", ".config", "hunk", "config.toml"),
     );
-    expect(resolveAppStatePath(env)).toBe(join("/tmp", "home", ".config", "hunk", "state.json"));
+    expect(resolveAppStatePath(env)).toBe(
+      join("/tmp", "home", ".local", "state", "hunk", "state.json"),
+    );
   });
 
   test("falls back to USERPROFILE when HOME is unavailable", () => {
@@ -39,7 +64,7 @@ describe("paths", () => {
       join("/tmp", "windows-profile", ".config", "hunk", "config.toml"),
     );
     expect(resolveAppStatePath(env)).toBe(
-      join("/tmp", "windows-profile", ".config", "hunk", "state.json"),
+      join("/tmp", "windows-profile", ".local", "state", "hunk", "state.json"),
     );
   });
 
@@ -91,6 +116,94 @@ describe("paths", () => {
       writeFileSync(fakeBinary, "binary\n");
 
       expect(resolveBundledSkillPath("hunk-review", [fakeBinary])).toBe(skillPath);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("prefers a staged skill beside the binary over a generic one further up", () => {
+    const tempRoot = createTempRoot("hunk-skill-proximity-");
+
+    try {
+      // A source install stages its skills under `hunkdiff/` beside the executable, so a
+      // reviewer with their own `skills/` directory anywhere above the bin directory must
+      // not shadow it. Exhausting the generic shape to the filesystem root first did.
+      const installDir = join(tempRoot, ".local", "bin");
+      const installedSkill = join(installDir, "hunkdiff", "skills", "hunk-review", "SKILL.md");
+      const unrelatedSkill = join(tempRoot, "skills", "hunk-review", "SKILL.md");
+      const fakeBinary = join(installDir, "hunk");
+
+      mkdirSync(dirname(installedSkill), { recursive: true });
+      mkdirSync(dirname(unrelatedSkill), { recursive: true });
+      writeFileSync(installedSkill, "# installed\n");
+      writeFileSync(unrelatedSkill, "# unrelated\n");
+      writeFileSync(fakeBinary, "binary\n");
+
+      expect(resolveBundledSkillPath("hunk-review", [fakeBinary])).toBe(installedSkill);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("prefers Hunk's staging tree over generic skills and a nested package", () => {
+    const tempRoot = createTempRoot("hunk-skill-specificity-");
+
+    try {
+      // All three shapes at one ancestor: the source install's namespaced copy wins.
+      const installedSkill = join(tempRoot, "hunkdiff", "skills", "hunk-review", "SKILL.md");
+      const staleGenericSkill = join(tempRoot, "skills", "hunk-review", "SKILL.md");
+      const staleNestedSkill = join(
+        tempRoot,
+        "node_modules",
+        "hunkdiff",
+        "skills",
+        "hunk-review",
+        "SKILL.md",
+      );
+      const fakeBinary = join(tempRoot, "hunk");
+
+      for (const skill of [installedSkill, staleGenericSkill, staleNestedSkill]) {
+        mkdirSync(dirname(skill), { recursive: true });
+      }
+      writeFileSync(installedSkill, "# installed\n");
+      writeFileSync(staleGenericSkill, "# stale generic\n");
+      writeFileSync(staleNestedSkill, "# stale nested\n");
+      writeFileSync(fakeBinary, "binary\n");
+
+      expect(resolveBundledSkillPath("hunk-review", [fakeBinary])).toBe(installedSkill);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("prefers a prebuilt artifact's own skills over a stale nested package", () => {
+    const tempRoot = createTempRoot("hunk-skill-prebuilt-");
+
+    try {
+      // A prebuilt release artifact ships `skills/` beside the binary with no `hunkdiff/`
+      // wrapper (see `stagePrebuiltArtifact`), so the shape that protects it from a stale
+      // `node_modules/hunkdiff` is `skills` ranking above `node_modules/hunkdiff/skills`.
+      // Deliberately omits `hunkdiff/` so only that pair decides the result: the
+      // source-install case above passes either way and cannot pin this ordering.
+      const shippedSkill = join(tempRoot, "skills", "hunk-review", "SKILL.md");
+      const staleNestedSkill = join(
+        tempRoot,
+        "node_modules",
+        "hunkdiff",
+        "skills",
+        "hunk-review",
+        "SKILL.md",
+      );
+      const fakeBinary = join(tempRoot, "hunk");
+
+      for (const skill of [shippedSkill, staleNestedSkill]) {
+        mkdirSync(dirname(skill), { recursive: true });
+      }
+      writeFileSync(shippedSkill, "# shipped\n");
+      writeFileSync(staleNestedSkill, "# stale\n");
+      writeFileSync(fakeBinary, "binary\n");
+
+      expect(resolveBundledSkillPath("hunk-review", [fakeBinary])).toBe(shippedSkill);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }

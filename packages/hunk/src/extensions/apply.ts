@@ -2,7 +2,7 @@ import {
   BUILT_IN_FILE_LANGUAGE_EXTENSIONS,
   replaceExtensionFileLanguages,
   type FileLanguageRegistration,
-} from "../core/changeset/fileLanguage";
+} from "../core/documents/fileLanguage";
 import type { StartupNotice } from "../core/process/startupNotice";
 import type { Changeset } from "../core/changeset/model";
 import { detectVcs, extendVcsCatalog, getDefaultVcsAdapter } from "../core/vcs";
@@ -220,7 +220,7 @@ export interface ResolvedExtensionLineHighlighters {
 
 /** Resolve line-highlighter identities while retaining registration order as the priority rule. */
 export function resolveExtensionLineHighlighters(
-  registry: ExtensionRegistry,
+  registry: Pick<ExtensionRegistry, "lineHighlighters">,
 ): ResolvedExtensionLineHighlighters {
   const highlighters: RegisteredLineHighlighter[] = [];
   const issues: ExtensionApplyIssue[] = [];
@@ -294,7 +294,9 @@ export interface ResolvedExtensionCommands {
  * command table, which is the UI's to build, so the dispatch layer decides
  * them and warns.
  */
-export function resolveExtensionCommands(registry: ExtensionRegistry): ResolvedExtensionCommands {
+export function resolveExtensionCommands(
+  registry: Pick<ExtensionRegistry, "commands">,
+): ResolvedExtensionCommands {
   const commands: RegisteredCommand[] = [];
   const issues: ExtensionApplyIssue[] = [];
   const claimed = new Set<string>();

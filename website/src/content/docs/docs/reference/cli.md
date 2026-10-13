@@ -16,34 +16,64 @@ This reference is generated from the command metadata used by Hunk itself. Run `
 
 ## Common review options
 
-| Option                      | Description                                                     |
-| --------------------------- | --------------------------------------------------------------- |
-| `--mode <mode>`             | layout mode: auto, split, unified                               |
-| `--cursor-line <style>`     | current-line marker: row, number, off                           |
-| `--theme <theme>`           | named theme override                                            |
-| `--agent-context <path>`    | JSON sidecar with agent rationale                               |
-| `--pager`                   | use pager-style chrome                                          |
-| `--experimental`            | enable experimental features (currently STML agent-note markup) |
-| `--fast`                    | experimentally offload eligible syntax highlighting             |
-| `--line-numbers`            | show line numbers                                               |
-| `--no-line-numbers`         | hide line numbers                                               |
-| `-x, --tab-width <columns>` | tab stop width: 1-16 Default: 4.                                |
-| `--file-gap <rows>`         | file separator rows, including the ─ rule: 0-8 Default: 1.      |
-| `--hunk-gap <rows>`         | blank rows before each later hunk: 0-8 Default: 0.              |
-| `--wrap`                    | wrap long diff lines                                            |
-| `--no-wrap`                 | truncate long diff lines to one row                             |
-| `--hunk-headers`            | show hunk metadata rows                                         |
-| `--no-hunk-headers`         | hide hunk metadata rows                                         |
-| `--sidebar`                 | show files pane                                                 |
-| `--no-sidebar`              | hide files pane                                                 |
-| `--agent-notes`             | show agent notes by default                                     |
-| `--no-agent-notes`          | hide agent notes by default                                     |
-| `--transparent-bg`          | let terminal background show through Hunk surfaces              |
-| `--no-transparent-bg`       | paint Hunk surfaces with the active theme                       |
-| `--extension <path>`        | load an extension entry file or directory (repeatable)          |
-| `--no-extensions`           | disable user extensions for this run                            |
+| Option                         | Description                                                              |
+| ------------------------------ | ------------------------------------------------------------------------ |
+| `--mode <mode>`                | layout mode: auto, split, unified                                        |
+| `--cursor-line <style>`        | current-line marker: row, number, off                                    |
+| `--theme <theme>`              | named theme override                                                     |
+| `--agent-context <path>`       | JSON sidecar with agent rationale                                        |
+| `--pager`                      | use pager-style chrome                                                   |
+| `--experimental`               | enable experimental features (currently STML agent-note markup)          |
+| `--line-numbers`               | show line numbers                                                        |
+| `--no-line-numbers`            | hide line numbers                                                        |
+| `-x, --tab-width <columns>`    | tab stop width: 1-16 Default: 4.                                         |
+| `--file-gap <rows>`            | file separator rows, including the ─ rule: 0-8 Default: 1.               |
+| `--hunk-gap <rows>`            | blank rows before each later hunk: 0-8 Default: 0.                       |
+| `--wheel-scroll-lines <lines>` | rows per wheel event: auto or 1-10 Default: auto.                        |
+| `--scroll-off <rows>`          | rows the current line keeps clear of the viewport edge: 0-40 Default: 5. |
+| `--wrap`                       | wrap long diff lines                                                     |
+| `--no-wrap`                    | truncate long diff lines to one row                                      |
+| `--hunk-headers`               | show hunk metadata rows                                                  |
+| `--no-hunk-headers`            | hide hunk metadata rows                                                  |
+| `--sidebar`                    | show files pane                                                          |
+| `--no-sidebar`                 | hide files pane                                                          |
+| `--agent-notes`                | show agent notes by default                                              |
+| `--no-agent-notes`             | hide agent notes by default                                              |
+| `--transparent-bg`             | let terminal background show through Hunk surfaces                       |
+| `--no-transparent-bg`          | paint Hunk surfaces with the active theme                                |
+| `--extension <path>`           | load an extension entry file or directory (repeatable)                   |
+| `--no-extensions`              | disable user extensions for this run                                     |
+| `--disable-extension <id>`     | disable one bundled or user extension for this run (repeatable)          |
+| `--enable-extension <id>`      | re-enable one extension for this run (repeatable)                        |
 
 `--experimental` may also be placed before the review command, as in `hunk --experimental diff`.
+
+## `hunk open`
+
+view a complete file or browse a directory
+
+### Usage
+
+```bash
+hunk open [path]
+```
+
+Defaults to the current directory. Reads are lazy and the browser refreshes automatically.
+
+Press i to show hidden and Git-ignored entries. Symlinks are displayed but not followed.
+
+### Command-specific options
+
+| Option                      | Description                         |
+| --------------------------- | ----------------------------------- |
+| `--theme <theme>`           | named theme override                |
+| `--line-numbers`            | show line numbers                   |
+| `--no-line-numbers`         | hide line numbers                   |
+| `--sidebar`                 | show the directory tree             |
+| `--no-sidebar`              | hide the directory tree             |
+| `--wrap`                    | wrap long document lines            |
+| `--no-wrap`                 | keep long document lines on one row |
+| `-x, --tab-width <columns>` | tab stop width: 1-16                |
 
 ## `hunk diff`
 
@@ -89,6 +119,60 @@ hunk show [target] [-- <pathspec...>]
 Also accepts `--watch`: auto-reload when the current diff input changes.
 
 Also accepts every [common review option](#common-review-options).
+
+## `hunk status`
+
+inspect the current workspace and sibling worktrees
+
+### Usage
+
+```bash
+hunk status [--static | --json]
+```
+
+Terminals open live workspace status; redirects receive one static snapshot.
+
+Enter inspects a row; S/U review staged/working-tree changes; L opens Log; Q returns or quits.
+
+F10 opens menus, T chooses a theme, R refreshes, and W expands other worktrees.
+
+--json emits the versioned status snapshot without paging or terminal color.
+
+Status never fetches or modifies the repository; providers without status report unsupported.
+
+### Command-specific options
+
+| Option                         | Description                                                              |
+| ------------------------------ | ------------------------------------------------------------------------ |
+| `--mode <mode>`                | layout mode: auto, split, unified                                        |
+| `--cursor-line <style>`        | current-line marker: row, number, off                                    |
+| `--theme <theme>`              | named theme override                                                     |
+| `--experimental`               | enable experimental features (currently STML agent-note markup)          |
+| `--line-numbers`               | show line numbers                                                        |
+| `--no-line-numbers`            | hide line numbers                                                        |
+| `-x, --tab-width <columns>`    | tab stop width: 1-16 Default: 4.                                         |
+| `--file-gap <rows>`            | file separator rows, including the ─ rule: 0-8 Default: 1.               |
+| `--hunk-gap <rows>`            | blank rows before each later hunk: 0-8 Default: 0.                       |
+| `--wheel-scroll-lines <lines>` | rows per wheel event: auto or 1-10 Default: auto.                        |
+| `--scroll-off <rows>`          | rows the current line keeps clear of the viewport edge: 0-40 Default: 5. |
+| `--wrap`                       | wrap long diff lines                                                     |
+| `--no-wrap`                    | truncate long diff lines to one row                                      |
+| `--hunk-headers`               | show hunk metadata rows                                                  |
+| `--no-hunk-headers`            | hide hunk metadata rows                                                  |
+| `--sidebar`                    | show files pane                                                          |
+| `--no-sidebar`                 | hide files pane                                                          |
+| `--agent-notes`                | show agent notes by default                                              |
+| `--no-agent-notes`             | hide agent notes by default                                              |
+| `--transparent-bg`             | let terminal background show through Hunk surfaces                       |
+| `--no-transparent-bg`          | paint Hunk surfaces with the active theme                                |
+| `--extension <path>`           | load an extension entry file or directory (repeatable)                   |
+| `--no-extensions`              | disable user extensions for this run                                     |
+| `--disable-extension <id>`     | disable one bundled or user extension for this run (repeatable)          |
+| `--enable-extension <id>`      | re-enable one extension for this run (repeatable)                        |
+| `--vcs <id>`                   | select a VCS status provider                                             |
+| `--static`                     | print one snapshot, paging when needed                                   |
+| `--json`                       | emit a version 1 JSON snapshot                                           |
+| `--color <mode>`               | color output: auto, always, never                                        |
 
 ## `hunk stash show`
 
@@ -144,6 +228,20 @@ Also accepts `--watch`: auto-reload when the current diff input changes.
 
 Also accepts every [common review option](#common-review-options).
 
+## `hunk completion`
+
+print a shell completion script
+
+### Usage
+
+```bash
+hunk completion <bash|zsh>
+```
+
+Load it into the current shell with `source <(hunk completion zsh)` or `eval "$(hunk completion bash)"`, and add that line to your shell startup file to keep it.
+
+For Zsh, initialize completion with `autoload -Uz compinit; compinit` before loading the script, unless your shell framework already does so.
+
 ## `hunk markup render`
 
 preview experimental STML markup as terminal text
@@ -183,9 +281,21 @@ print a bundled Hunk skill path
 hunk skill path [name]
 ```
 
+## `hunk skill show`
+
+print a bundled Hunk skill
+
+### Usage
+
+```bash
+hunk skill show [name]
+```
+
+Prints the full SKILL.md shipped with the installed Hunk version. Pointer skills installed with `npx skills add modem-dev/hunk` run this command to load their instructions, so the text always matches the installed CLI.
+
 ## `hunk extension install`
 
-install a shared extension from a git repository
+install a shared extension from Git or npm
 
 ### Usage
 
@@ -193,6 +303,7 @@ install a shared extension from a git repository
 hunk extension install <owner>/<repo>[@ref]
 hunk extension install git:<host>/<path>[@ref]
 hunk extension install <git-url or local path>[@ref]
+hunk extension install npm:<package>[@version-or-range-or-tag]
 ```
 
 **Aliases:** `hunk ext install`.
@@ -217,7 +328,7 @@ hunk extension list
 
 ## `hunk extension update`
 
-re-clone managed extension installs from their recorded sources
+update managed extension installs from their recorded sources
 
 ### Usage
 
@@ -277,6 +388,47 @@ hunk daemon serve
 | `HUNK_MCP_HOST`                | Bind host; defaults to loopback `127.0.0.1`.     |
 | `HUNK_MCP_PORT`                | Bind port; defaults to `47657`.                  |
 | `HUNK_MCP_UNSAFE_ALLOW_REMOTE` | Set to `1` to allow unsafe non-loopback binding. |
+
+## `hunk daemon status`
+
+report the running session daemon's build, uptime, and attached windows
+
+### Usage
+
+```bash
+hunk daemon status [--json]
+```
+
+After a Hunk upgrade, a daemon from the previous build keeps running while any window holds it open, and windows or `hunk session` commands from the new build cannot attach to it. `status` shows which build the daemon is, how it compares to this CLI, and which windows are attached; attached windows are marked `(older build)` when they could not reconnect to a daemon started from this CLI.
+
+A daemon from a Hunk release before this command cannot report its build; `status` then shows what its launch metadata recorded.
+
+### Command-specific options
+
+| Option   | Description              |
+| -------- | ------------------------ |
+| `--json` | print the status as JSON |
+
+## `hunk daemon restart`
+
+stop the running session daemon and start one from this Hunk build
+
+### Usage
+
+```bash
+hunk daemon restart [--yes] [--json]
+```
+
+Prints the same summary as `status`, asks for confirmation, stops the daemon, and starts a replacement from this CLI's binary. Windows from this build that could not attach register with the replacement on their own; windows from the old build are disconnected and must be relaunched, which loses their in-window notes. The daemon is never replaced automatically.
+
+A daemon from a Hunk release before this command cannot be asked to stop; `restart` then asks separately before sending SIGTERM to the pid its launch metadata recorded.
+
+### Command-specific options
+
+| Option   | Description                                                           |
+| -------- | --------------------------------------------------------------------- |
+| `--yes`  | skip the confirmation prompts (required when stdin is not a terminal) |
+| `--json` | print the result as JSON                                              |
 
 ## `hunk session`
 

@@ -18,6 +18,12 @@ import {
 } from "@hunk/session-broker";
 import { HUNK_SESSION_API_VERSION, HUNK_SESSION_DAEMON_VERSION } from "../protocol";
 import { serveSessionBrokerDaemon } from "./brokerServer";
+import {
+  probeHunkSessionDaemonAdminStatus,
+  requestHunkSessionDaemonStop,
+} from "../client/daemonAdmin";
+import { resolveSessionBrokerConfig } from "./brokerConfig";
+import { resolveCliVersion } from "../../core/run/version";
 import { loadOrCreateHunkSessionBrokerCredentials } from "./credentials";
 import { HUNK_SESSION_BROKER_APP_ID, HUNK_SESSION_BROKER_APP_REVISION } from "./appContract";
 
@@ -100,6 +106,7 @@ async function authenticatedFetch(
   port: number,
   path: string,
   init: SessionBrokerSignedRequestInit = {},
+  options: { targetSpecific?: boolean } = {},
 ) {
   const credentials = await loadOrCreateHunkSessionBrokerCredentials();
   const caller = new SessionBrokerCallerClient({
@@ -114,7 +121,7 @@ async function authenticatedFetch(
       ? ((JSON.parse(init.body) as { action?: string }).action ?? "")
       : "";
   return caller.request(path, init, {
-    targetSpecific: path === "/session-api" && action !== "list",
+    targetSpecific: options.targetSpecific ?? (path === "/session-api" && action !== "list"),
   });
 }
 
@@ -682,6 +689,57 @@ describe("Hunk session daemon server", () => {
     }
   });
 
+  // Intent: `hunk daemon status` / `restart` and the TUI's skew notice all read the daemon
+  // through the admin scope, which must answer with the same credential regardless of app
+  // revision and must retire attached windows with the restart reason on stop.
+  test("serves admin status and stop for the on-disk caller credential", async () => {
+    const port = await reserveLoopbackPort();
+    process.env.HUNK_MCP_HOST = "127.0.0.1";
+    process.env.HUNK_MCP_PORT = String(port);
+    const config = resolveSessionBrokerConfig();
+
+    const server = await serveSessionBrokerDaemon({
+      idleTimeoutMs: 250,
+      staleSessionTtlMs: 500,
+      staleSessionSweepIntervalMs: 25,
+    });
+    const socket = await openRegisteredSession(port, "session-admin");
+    const closeReason = new Promise<string>((resolve) => {
+      socket.addEventListener("close", (event) => resolve(event.reason));
+    });
+
+    try {
+      const probe = await probeHunkSessionDaemonAdminStatus(config);
+      expect(probe).toMatchObject({
+        kind: "status",
+        status: {
+          adminScopeVersion: 1,
+          daemonVersion: HUNK_SESSION_DAEMON_VERSION,
+          appVersion: resolveCliVersion(),
+          sessions: [
+            {
+              sessionId: "session-admin",
+              pid: expect.any(Number),
+              cwd: expect.any(String),
+              title: expect.any(String),
+              clientDaemonVersion: HUNK_SESSION_DAEMON_VERSION,
+            },
+          ],
+        },
+      });
+
+      await expect(requestHunkSessionDaemonStop(config)).resolves.toBe("stopping");
+      await expect(closeReason).resolves.toBe("Session daemon restarting.");
+      await waitForShutdown(port, 1_500);
+      await expect(probeHunkSessionDaemonAdminStatus(config)).resolves.toEqual({
+        kind: "unavailable",
+      });
+    } finally {
+      socket.close();
+      server.stop(true);
+    }
+  });
+
   test("shuts down after the last live session disconnects", async () => {
     const port = await reserveLoopbackPort();
     process.env.HUNK_MCP_HOST = "127.0.0.1";
@@ -704,7 +762,9 @@ describe("Hunk session daemon server", () => {
     }
   });
 
-  test("shuts down after stale-session pruning leaves zero live sessions", async () => {
+  // A silent producer whose transport stays connected is suspended (SIGSTOP), not dead, so the
+  // daemon must stay alive for it; only the transport close lets quiescent shutdown proceed.
+  test("keeps a silent session past the stale TTL and shuts down once its transport closes", async () => {
     const port = await reserveLoopbackPort();
     process.env.HUNK_MCP_HOST = "127.0.0.1";
     process.env.HUNK_MCP_PORT = String(port);
@@ -717,6 +777,11 @@ describe("Hunk session daemon server", () => {
     const socket = await openRegisteredSession(port);
 
     try {
+      await Bun.sleep(200);
+      await expect(waitForHealth(port)).resolves.toEqual({ ok: true });
+
+      socket.close();
+      await waitForSessionCount(port, 0);
       await waitForShutdown(port, 1_000);
     } finally {
       socket.close();
@@ -878,6 +943,82 @@ describe("Hunk session daemon server", () => {
       });
     } finally {
       SessionBrokerState.prototype.dispatchCommand = original;
+      server.stop(true);
+    }
+  });
+
+  test("reports why a repo selector matched no session instead of a redacted failure", async () => {
+    const port = await reserveLoopbackPort();
+    process.env.HUNK_MCP_HOST = "127.0.0.1";
+    process.env.HUNK_MCP_PORT = String(port);
+
+    const original = SessionBrokerState.prototype.dispatchCommand;
+    const dispatched: string[] = [];
+    SessionBrokerState.prototype.dispatchCommand = (({ command }: { command: string }) => {
+      dispatched.push(command);
+      return Promise.reject(new Error("A selector miss must not dispatch."));
+    }) as SessionBrokerState["dispatchCommand"];
+
+    const server = await serveSessionBrokerDaemon();
+    let socket: WebSocket | undefined;
+
+    try {
+      // The live window is showing /repo; the caller is in a different checkout.
+      socket = await openRegisteredSession(port);
+      for (const request of [
+        { action: "get", selector: { repoRoot: "/elsewhere" } },
+        {
+          action: "reload",
+          selector: { repoRoot: "/elsewhere" },
+          nextInput: { kind: "vcs", staged: false, options: {} },
+        },
+      ]) {
+        const response = await authenticatedFetch(port, "/session-api", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        });
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toEqual({
+          error: "No active session matches repoRoot /elsewhere.",
+        });
+      }
+      expect(dispatched).toEqual([]);
+    } finally {
+      SessionBrokerState.prototype.dispatchCommand = original;
+      socket?.close();
+      server.stop(true);
+    }
+  });
+
+  test("keeps malformed session API bodies redacted", async () => {
+    const port = await reserveLoopbackPort();
+    process.env.HUNK_MCP_HOST = "127.0.0.1";
+    process.env.HUNK_MCP_PORT = String(port);
+
+    const server = await serveSessionBrokerDaemon();
+
+    try {
+      const response = await authenticatedFetch(
+        port,
+        "/session-api",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            action: "reload",
+            selector: { repoRoot: "/repo" },
+            nextInput: { kind: "vcs", staged: false, options: { notAnOption: true } },
+          }),
+        },
+        // An unparseable body has no trustworthy target, so the daemon signs it untargeted.
+        { targetSpecific: false },
+      );
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: "protocol-validation-failed" });
+    } finally {
       server.stop(true);
     }
   });

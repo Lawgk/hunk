@@ -29,7 +29,8 @@ export type ExtensionCategory =
   | "Line highlighter"
   | "File view"
   | "VCS backend"
-  | "Changeset transform";
+  | "Changeset transform"
+  | "Language";
 
 /** One directory listing, before build-time repository metadata is merged in. */
 export interface ExtensionListing {
@@ -65,15 +66,6 @@ export type ExtensionEntry = ExtensionListing & ExtensionActivity;
  * it with the sort control.
  */
 export const EXTENSION_CATALOG: readonly ExtensionListing[] = [
-  {
-    repo: "modem-dev/hunk-gh",
-    name: "hunk-gh",
-    summary:
-      "Opens a GitHub pull request, commit, or comparison diff in Hunk straight from the command line, without installing the GitHub CLI.",
-    categories: ["Command"],
-    version: "0.1.0",
-    apiVersion: 10,
-  },
   {
     repo: "modem-dev/hunk-hg",
     name: "hunk-hg",
@@ -125,12 +117,22 @@ export const EXTENSION_CATALOG: readonly ExtensionListing[] = [
     apiVersion: 6,
   },
   {
-    repo: "elucid/hunk-less-search",
-    name: "hunk-less-search",
-    summary: "less-style forward search across the review stream, with in-diff match marks.",
-    categories: ["Keyboard mode", "Line highlighter", "Pane", "Command"],
+    repo: "bottercode/hunk-why",
+    name: "hunk-why",
+    summary:
+      "Adds a `why` command that opens the working-tree review with notes explaining why Claude Code wrote each hunk, read from its local transcripts.",
+    categories: ["Command"],
     version: "0.1.0",
-    apiVersion: 5,
+    apiVersion: 10,
+  },
+  {
+    repo: "brettinternet/hunk-guide",
+    name: "hunk-guide",
+    summary:
+      "Walks a changeset as a guided tour of ordered sections in a pane, with exact-line navigation and review progress kept per session.",
+    categories: ["Pane", "Command"],
+    version: "0.1.0",
+    apiVersion: 30,
   },
   {
     repo: "evantravers/hunk-mark-as-reviewed",
@@ -158,6 +160,14 @@ export const EXTENSION_CATALOG: readonly ExtensionListing[] = [
     apiVersion: 6,
   },
   {
+    repo: "HackAttack/hunk-starlark",
+    name: "hunk-starlark",
+    summary: "Highlights Bazel, Buck2, and other Starlark files as Python.",
+    categories: ["Language"],
+    version: "1.0.0",
+    apiVersion: 9,
+  },
+  {
     repo: "jacegodk/hunk-viewed",
     name: "hunk-viewed",
     summary:
@@ -176,12 +186,48 @@ export const EXTENSION_CATALOG: readonly ExtensionListing[] = [
     apiVersion: 6,
   },
   {
+    repo: "LandonSchropp/hunk-backup",
+    name: "hunk-backup",
+    summary:
+      "Saves every review's comments as you write them, so closing Hunk never loses them, and lists and shows the backups with `hunk backup`.",
+    categories: ["Command"],
+    version: "0.1.0",
+    apiVersion: 25,
+  },
+  {
+    repo: "LandonSchropp/hunk-verdict",
+    name: "hunk-verdict",
+    summary:
+      "Approves, denies, or comments on a diff from inside Hunk, and hands the decision to a listening agent.",
+    categories: ["Pane", "Keyboard mode", "Command"],
+    version: "0.3.0",
+    apiVersion: 25,
+  },
+  {
+    repo: "meldron/hunk-mark-read",
+    name: "hunk-mark-read",
+    summary:
+      "Marks files as read, dims what you've reviewed, and jumps to the next unread file, with marks kept between runs.",
+    categories: ["Pane", "Command", "Line highlighter"],
+    version: "0.1.0",
+    apiVersion: 28,
+  },
+  {
     repo: "mikeclarke/hunk-tutor",
     name: "hunk-tutor",
     summary: "An interactive tour of Hunk, taught inside a practice review.",
     categories: ["Pane", "Theme", "Line highlighter", "Command", "VCS backend"],
     version: "0.1.0",
     apiVersion: 5,
+  },
+  {
+    repo: "morinokami/hunk-triage",
+    name: "hunk-triage",
+    summary:
+      "Classifies changed files with TypeSafe's Jev and regroups the file pane by review priority, from core changes down to generated and unclassified.",
+    categories: ["Pane", "Changeset transform"],
+    version: "0.1.0",
+    apiVersion: 25,
   },
   {
     repo: "muzomer/hunk-commit",

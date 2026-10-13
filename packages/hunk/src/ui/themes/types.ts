@@ -20,7 +20,9 @@ export interface AppTheme {
   addedContentBg: string;
   removedContentBg: string;
   contextContentBg: string;
+  /** Positive foreground; status uses this for staged changes, independent of change type. */
   addedSignColor: string;
+  /** Negative foreground; status uses this for unstaged/untracked changes, not just deletions. */
   removedSignColor: string;
   lineNumberBg: string;
   lineNumberFg: string;
@@ -41,6 +43,8 @@ export interface AppTheme {
   syntaxTheme?: string;
   /** Exact Shiki/TextMate scope colors layered onto the base syntax theme. */
   syntaxScopeOverrides?: Record<string, string>;
+  /** Drop the base syntax theme's own scope rules so only the overrides color code. */
+  syntaxScopesReplaceBase?: boolean;
   syntaxColors: SyntaxColors;
 }
 

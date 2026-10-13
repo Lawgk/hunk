@@ -59,13 +59,13 @@ const HELP_SECTIONS: readonly HelpSectionSpec[] = [
         description: "previous / next file",
       },
       {
-        commandIds: [
-          "hunk.review.previousAnnotatedHunk",
-          "hunk.review.nextAnnotatedHunk",
-          "hunk.review.previousNote",
-          "hunk.review.nextNote",
-        ],
+        commandIds: ["hunk.review.previousAnnotatedHunk", "hunk.review.nextAnnotatedHunk"],
         description: "annotated hunk / exact note",
+      },
+      { commandIds: ["hunk.search.find"], description: "search diff content" },
+      {
+        commandIds: ["hunk.search.next", "hunk.search.previous"],
+        description: "next / previous search match",
       },
       {
         commandIds: ["hunk.review.scrollCodeLeft", "hunk.review.scrollCodeRight"],
@@ -112,6 +112,7 @@ const HELP_SECTIONS: readonly HelpSectionSpec[] = [
     entries: [
       { commandIds: ["hunk.review.focusFilter"], description: "focus file filter" },
       { commandIds: ["hunk.review.startNote"], description: "create review note" },
+      { commandIds: ["hunk.review.saveNote"], description: "save draft note" },
       {
         commandIds: [
           "hunk.review.editActiveNote",

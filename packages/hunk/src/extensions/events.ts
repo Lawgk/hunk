@@ -13,6 +13,7 @@ import type {
   ExtensionPaneControls,
   ExtensionReviewReloadControls,
   ExtensionReviewNavigation,
+  ExtensionStatusLineControls,
   ExtensionVcsFileChangeType,
 } from "../extension-api/types";
 import { summarizeHunk } from "../core/changeset/hunkSummary";
@@ -308,6 +309,7 @@ function unavailablePaneControls(
     close: (viewId) => unavailable("close", viewId),
     toggle: (viewId) => unavailable("toggle", viewId),
     isOpen: () => false,
+    isVisible: () => false,
   };
 }
 
@@ -345,6 +347,19 @@ function unavailableDialogs(result: ExtensionLoadResult, extensionId: string): E
       return null;
     },
   };
+}
+
+/** Status-line controls used before the mounted app owns a status row. */
+function unavailableStatusLineControls(
+  result: ExtensionLoadResult,
+  extensionId: string,
+): ExtensionStatusLineControls {
+  const unavailable = () =>
+    result.context.notify(
+      `Extension ${extensionId} cannot write to the status line before the app is ready`,
+      "warning",
+    );
+  return { set: unavailable, clear: unavailable };
 }
 
 /** Review reload controls used before the mounted app can rebuild its current input. */
@@ -385,6 +400,7 @@ function createEventContext(
     sidebars: panes,
     navigation: unavailableReviewNavigation(result, extensionId),
     dialogs: unavailableDialogs(result, extensionId),
+    statusLine: unavailableStatusLineControls(result, extensionId),
     review: unavailableReviewReloadControls(result, extensionId),
     events: {
       emit(event, payload) {

@@ -10,7 +10,12 @@ import {
   type RefObject,
 } from "react";
 import { DEFAULT_FILE_GAP, DEFAULT_HUNK_GAP } from "../../../core/run/reviewGap";
+import { DEFAULT_SCROLL_OFF } from "../../../core/run/scrollOff";
 import { DEFAULT_TAB_WIDTH } from "../../../core/run/tabWidth";
+import {
+  DEFAULT_WHEEL_SCROLL_LINES,
+  type WheelScrollLines,
+} from "../../../core/run/wheelScrollLines";
 import type { DiffFile } from "../../../core/changeset/model";
 import type { CursorLine, LayoutMode } from "../../../core/run/commandInputs";
 import type { ReviewNoteTargetV1 } from "../../../core/review/types";
@@ -25,7 +30,11 @@ import type { FileSourceStatus } from "../../diff/expandCollapsedRows";
 import type { ActiveAddNoteAffordance } from "../../diff/DiffSectionBody";
 import type { CursorHighlight } from "../../diff/cursorHighlight";
 import { useIntermediateRenderAfterMount } from "../../hooks/useIntermediateRenderAfterMount";
-import type { DraftReviewNote, StoredReviewNoteRenderMetadata } from "../../lib/reviewNoteMapping";
+import {
+  storedReviewNoteMetadata,
+  storedReviewNoteTarget,
+  type DraftReviewNote,
+} from "../../lib/reviewNoteMapping";
 import {
   createVisibleAgentNote,
   reviewNoteSource,
@@ -117,36 +126,6 @@ const EMPTY_VISIBLE_AGENT_NOTES: VisibleAgentNote[] = [];
 type StartUserNoteAtHunk = {
   bivarianceHack(fileId: string, hunkIndex: number, target?: ReviewNoteTargetV1): void;
 }["bivarianceHack"];
-
-/** Read terminal-only semantic note metadata without granting it to static sidecars. */
-function storedReviewNoteMetadata(
-  annotation: AgentAnnotation,
-): StoredReviewNoteRenderMetadata | undefined {
-  const candidate = annotation as AgentAnnotation & Partial<StoredReviewNoteRenderMetadata>;
-  return candidate.semanticallyStored === true && typeof candidate.reviewNoteId === "string"
-    ? (candidate as AgentAnnotation & StoredReviewNoteRenderMetadata)
-    : undefined;
-}
-
-/** Read the semantic placement retained on stored terminal note projections. */
-function storedReviewNoteTarget(
-  annotation: AgentAnnotation,
-): { hunkIndex: number; side: "old" | "new"; line: number } | undefined {
-  const candidate = annotation as AgentAnnotation & {
-    hunkIndex?: unknown;
-    side?: unknown;
-    line?: unknown;
-  };
-  return Number.isInteger(candidate.hunkIndex) &&
-    (candidate.side === "old" || candidate.side === "new") &&
-    Number.isInteger(candidate.line)
-    ? {
-        hunkIndex: candidate.hunkIndex as number,
-        side: candidate.side,
-        line: candidate.line as number,
-      }
-    : undefined;
-}
 
 /** Grant saved-note card actions from semantic ownership rather than presentation labels. */
 export function storedReviewNoteActions({
@@ -316,8 +295,8 @@ export function DiffPane({
   expandedGapsByFileId = EMPTY_EXPANDED_GAPS_BY_FILE_ID,
   fileViews = EMPTY_FILE_VIEWS,
   files,
+  visibleHunkIndexesByFileId,
   semanticFileIdentities,
-  offloadLargeDiff = false,
   lineHighlights = EMPTY_LINE_HIGHLIGHTS,
   headerLabelWidth,
   headerStatsWidth,
@@ -336,6 +315,7 @@ export function DiffPane({
   draftNoteFocused = false,
   separatorWidth,
   pagerMode = false,
+  scrollFocused = pagerMode,
   copyDecorations = false,
   screenTop = 0,
   showTopChrome,
@@ -347,6 +327,8 @@ export function DiffPane({
   tabWidth = DEFAULT_TAB_WIDTH,
   fileGap = DEFAULT_FILE_GAP,
   hunkGap = DEFAULT_HUNK_GAP,
+  scrollOff = DEFAULT_SCROLL_OFF,
+  wheelScrollLines = DEFAULT_WHEEL_SCROLL_LINES,
   wrapLines,
   wrapToggleScrollTop,
   layoutToggleScrollTop = null,
@@ -368,6 +350,7 @@ export function DiffPane({
   onRemoveLiveNote,
   onRemoveUserNote,
   onSaveDraftNote,
+  draftSaveKeyLabel,
   onStartUserNoteAtHunk,
   onUpdateDraftNote,
   onBlurDraftNote,
@@ -392,10 +375,10 @@ export function DiffPane({
   /** Validated alternate layouts, keyed by file id; raw Pierre remains the fallback. */
   fileViews?: ReadonlyMap<string, ResolvedFileViewLayout>;
   files: DiffFile[];
+  /** Optional extension-owned hunk projection keyed by runtime file id. */
+  visibleHunkIndexesByFileId?: ReadonlyMap<string, ReadonlySet<number>> | null;
   /** Already-projected semantic identities for selection invalidation. */
   semanticFileIdentities?: readonly string[];
-  /** Offload eligible syntax highlighting for this launch. */
-  offloadLargeDiff?: boolean;
   /** Validated extension line marks, keyed by file id. */
   lineHighlights?: ReadonlyMap<string, readonly ValidatedLineHighlight[]>;
   headerLabelWidth: number;
@@ -419,6 +402,8 @@ export function DiffPane({
   draftNoteFocused?: boolean;
   separatorWidth: number;
   pagerMode?: boolean;
+  /** Give the scrollbox keyboard focus only while the host review owns input. */
+  scrollFocused?: boolean;
   copyDecorations?: boolean;
   screenTop?: number;
   showTopChrome?: boolean;
@@ -431,6 +416,8 @@ export function DiffPane({
   tabWidth?: number;
   fileGap?: number;
   hunkGap?: number;
+  scrollOff?: number;
+  wheelScrollLines?: WheelScrollLines;
   wrapLines: boolean;
   wrapToggleScrollTop: number | null;
   layoutToggleScrollTop?: number | null;
@@ -456,6 +443,8 @@ export function DiffPane({
   onRemoveLiveNote?: (noteId: string) => void;
   onRemoveUserNote?: (noteId: string) => void;
   onSaveDraftNote?: (editorBody?: string) => void;
+  /** Live chord for the draft save action; omitted when unbound. */
+  draftSaveKeyLabel?: string;
   onStartUserNoteAtHunk?: StartUserNoteAtHunk;
   onUpdateDraftNote?: (body: string) => void;
   onBlurDraftNote?: () => void;
@@ -477,8 +466,8 @@ export function DiffPane({
   const renderTopChrome = showTopChrome ?? !pagerMode;
   const renderer = useRenderer();
   const mouseWheelScrollAcceleration = useMemo(
-    () => createReviewMouseWheelScrollAcceleration(),
-    [],
+    () => createReviewMouseWheelScrollAcceleration(wheelScrollLines),
+    [wheelScrollLines],
   );
   const [currentLineRowPlan, setCurrentLineRowPlan] = useState<{
     source: { file: DiffFile; theme: AppTheme; tabWidth: number };
@@ -491,8 +480,8 @@ export function DiffPane({
   const onActiveAddNoteAffordanceChangeRef = useRef(onActiveAddNoteAffordanceChange);
   onActiveAddNoteAffordanceChangeRef.current = onActiveAddNoteAffordanceChange;
 
-  /** Hide hover-only row controls when content scrolls under a stationary mouse pointer. */
-  const clearAddNoteHoverForScroll = useCallback(() => {
+  /** Hide hover-only row controls when content scrolls or terminal focus leaves Hunk. */
+  const clearAddNoteHover = useCallback(() => {
     const hoveredFileId = hoveredFileIdRef.current;
     if (!hoveredFileId) {
       return;
@@ -504,6 +493,13 @@ export function DiffPane({
     hoveredFileIdRef.current = null;
     onActiveAddNoteAffordanceChangeRef.current?.(null);
   }, []);
+
+  useEffect(() => {
+    renderer.on("blur", clearAddNoteHover);
+    return () => {
+      renderer.off("blur", clearAddNoteHover);
+    };
+  }, [clearAddNoteHover, renderer]);
 
   const adjacentPrefetchFileIds = useMemo(
     () => buildAdjacentPrefetchFileIds(files, selectedFileId),
@@ -565,7 +561,7 @@ export function DiffPane({
         return;
       }
 
-      clearAddNoteHoverForScroll();
+      clearAddNoteHover();
 
       if (!scrollBox || wrapLines) {
         return;
@@ -609,7 +605,7 @@ export function DiffPane({
       event.preventDefault();
       event.stopPropagation();
     },
-    [clearAddNoteHoverForScroll, onScrollCodeHorizontally, scrollRef, wrapLines],
+    [clearAddNoteHover, onScrollCodeHorizontally, scrollRef, wrapLines],
   );
 
   const allAgentNotesByFile = useMemo(() => {
@@ -630,7 +626,7 @@ export function DiffPane({
       const notes: VisibleAgentNote[] = annotations.flatMap((annotation, index) => {
         const source = reviewNoteSource(annotation);
         const metadata = storedReviewNoteMetadata(annotation);
-        const storedTarget = metadata ? storedReviewNoteTarget(annotation) : undefined;
+        const storedTarget = storedReviewNoteTarget(annotation);
         if (
           metadata &&
           draftNote?.kind === "edit" &&
@@ -744,6 +740,7 @@ export function DiffPane({
             onFocus: onFocusDraftNote,
             onInput: onUpdateDraftNote ?? (() => {}),
             onSave: onSaveDraftNote ?? (() => {}),
+            ...(draftSaveKeyLabel ? { saveKeyLabel: draftSaveKeyLabel } : {}),
           },
         });
         if (draftNote.kind === "edit" && draftNote.targetNoteId) {
@@ -814,6 +811,7 @@ export function DiffPane({
     onRemoveLiveNote,
     onRemoveUserNote,
     onSaveDraftNote,
+    draftSaveKeyLabel,
     onUpdateDraftNote,
     noteActionKeyLabels,
     showAgentNotes,
@@ -871,6 +869,12 @@ export function DiffPane({
   // Initialized to null so the first render never fires a selection change; a real scroll
   // is required before passive viewport-follow selection can trigger.
   const lastViewportSelectionTopRef = useRef<number | null>(null);
+  // Preserve the original line through successive clamps. Intermediate viewport-edge
+  // stops need no history: ordinary clamping follows them until the original is visible.
+  const lineCursorBeforeClampRef = useRef<LineCursor | null>(null);
+  // The cursor this effect last acted on, so deliberate cursor moves outside a clamp reset
+  // the unwind memory above instead of leaving a displaced stop behind.
+  const lastClampCursorRef = useRef<LineCursor | null>(null);
   const lastViewportRowAnchorRef = useRef<ViewportRowAnchor | null>(null);
   // Track the previous selected anchor to detect actual selection changes.
   const prevSelectedAnchorIdRef = useRef<string | null>(null);
@@ -988,7 +992,7 @@ export function DiffPane({
         // now sit over a different row, but only an actual mouse move should reveal row actions.
         const previousTop = prevScrollTopRef.current;
         scrollbarRef.current?.show();
-        clearAddNoteHoverForScroll();
+        clearAddNoteHover();
         const rapidOverscanRows = computeRapidScrollOverscanRows({
           deltaRows: nextTop - previousTop,
           viewportHeight: nextHeight,
@@ -1076,14 +1080,7 @@ export function DiffPane({
       scrollBox.verticalScrollBar.off("change", handleViewportChange);
       scrollBox.viewport.off("resize", handleViewportResize);
     };
-  }, [
-    activateRapidScrollOverscan,
-    clearAddNoteHoverForScroll,
-    files.length,
-    height,
-    scrollRef,
-    wrapLines,
-  ]);
+  }, [activateRapidScrollOverscan, clearAddNoteHover, files.length, height, scrollRef, wrapLines]);
 
   const sectionHeaderHeights = useMemo(() => buildInStreamFileHeaderHeights(files), [files]);
   const reserveAddNoteColumn = Boolean(onStartUserNoteAtHunk);
@@ -1113,6 +1110,7 @@ export function DiffPane({
           reserveAddNoteColumn,
           tabWidth,
           hunkGap,
+          visibleHunkIndexesByFileId?.get(file.id),
         );
       }),
     [
@@ -1128,6 +1126,7 @@ export function DiffPane({
       sourceStatusByFileId,
       tabWidth,
       theme,
+      visibleHunkIndexesByFileId,
       wrapLines,
     ],
   );
@@ -1161,6 +1160,7 @@ export function DiffPane({
           reserveAddNoteColumn,
           tabWidth,
           hunkGap,
+          visibleHunkIndexesByFileId?.get(file.id),
         );
       }),
     [
@@ -1178,6 +1178,7 @@ export function DiffPane({
       sourceStatusByFileId,
       tabWidth,
       theme,
+      visibleHunkIndexesByFileId,
       wrapLines,
     ],
   );
@@ -1570,20 +1571,9 @@ export function DiffPane({
         continue;
       }
 
-      void prefetchHighlightedDiff({
-        file,
-        offloadLargeDiff,
-        theme,
-      });
+      void prefetchHighlightedDiff({ file, theme });
     }
-  }, [
-    files,
-    highlightPrefetchFileIds,
-    initialWrappedRenderWindowWarmed,
-    offloadLargeDiff,
-    theme,
-    wrapLines,
-  ]);
+  }, [files, highlightPrefetchFileIds, initialWrappedRenderWindowWarmed, theme, wrapLines]);
 
   // Keep the selected file/hunk derived from the visible viewport for actual scroll-driven
   // movement, while leaving the initial mount and non-scroll relayouts alone.
@@ -1612,15 +1602,31 @@ export function DiffPane({
       return;
     }
 
+    // A deliberate cursor move (a click, a step) ends any clamp unwind: the reviewer chose
+    // a new stop, so a later scroll must not restore the displaced one.
+    if (lineCursor !== lastClampCursorRef.current) {
+      lineCursorBeforeClampRef.current = null;
+      lastClampCursorRef.current = lineCursor;
+    }
+
     if (lineCursors.length > 0) {
+      // Restore the original line directly, whether a return arrives as paced events or
+      // one burst. Remembering only that line keeps restoration lookup constant-time.
       const clampedCursor = clampLineCursorToViewport({
         boundsOf: lineCursorBoundsOf,
         current: lineCursor,
+        clampedFrom: lineCursorBeforeClampRef.current,
         cursors: lineCursors,
         scrollTop: scrollViewport.top,
         viewportHeight: scrollViewport.height,
       });
       if (clampedCursor && clampedCursor !== lineCursor) {
+        if (clampedCursor === lineCursorBeforeClampRef.current) {
+          lineCursorBeforeClampRef.current = null;
+        } else if (lineCursorBeforeClampRef.current === null) {
+          lineCursorBeforeClampRef.current = lineCursor;
+        }
+        lastClampCursorRef.current = clampedCursor;
         onViewportLineCursorChange?.(clampedCursor);
       }
       return;
@@ -2031,7 +2037,7 @@ export function DiffPane({
 
       if (anchorTop !== null) {
         const draftBounds =
-          draftNoteId && draftNoteFileId && scrollToNote
+          draftNoteId && draftNoteFileId
             ? rowBoundsInStream(draftNoteFileId, inlineNoteStableKey(draftNoteId))
             : undefined;
         const nextTop = draftBounds
@@ -2040,12 +2046,12 @@ export function DiffPane({
               lineHeight: draftBounds.height,
               scrollTop: anchorTop,
               viewportHeight: scrollRef.current?.viewport.height || scrollViewport.height,
+              scrollOff,
             })
           : anchorTop;
         const restoreViewportAnchor = () => {
-          // Cursor- and click-targeted composers are already at the reviewer's position, so their
-          // stream geometry pushes following rows down without pulling the target line upward.
-          // Default draft starts still reveal the full composer because they may target offscreen.
+          // Preserve the target line's position when the composer fits; otherwise reveal the
+          // whole composer, including Save/Cancel, with only the missing rows of scrolling.
           scrollRef.current?.scrollTo(nextTop);
         };
 
@@ -2137,6 +2143,7 @@ export function DiffPane({
     layoutToggleRequestId,
     layoutToggleScrollTop,
     rowBoundsInStream,
+    scrollOff,
     scrollRef,
     scrollViewport.height,
     scrollViewport.top,
@@ -2422,6 +2429,7 @@ export function DiffPane({
               lineHeight: bounds.height,
               scrollTop: scrollBox.scrollTop,
               viewportHeight,
+              scrollOff,
             });
     // A named line is the final scroll policy for this request, exactly as an
     // explicit alignment is: a cross-file reveal changes the selection, and the
@@ -2444,6 +2452,7 @@ export function DiffPane({
     lineCursorBoundsOf,
     lineCursorRevealRequest,
     rowBoundsInStream,
+    scrollOff,
     scrollRef,
     scrollViewport.height,
     supersedePendingSelectionReveal,
@@ -2552,7 +2561,7 @@ export function DiffPane({
                 height="100%"
                 scrollY={true}
                 viewportCulling={true}
-                focused={pagerMode}
+                focused={scrollFocused}
                 onMouseDown={beginCopySelection}
                 onMouseDrag={updateCopySelection}
                 onMouseDragEnd={endCopySelection}
@@ -2600,7 +2609,6 @@ export function DiffPane({
                         extensionLineHighlights={lineHighlights.get(file.id)}
                         file={file}
                         fileView={fileViewRenderPlans.get(file.id)?.fileView}
-                        offloadLargeDiff={offloadLargeDiff}
                         headerLabelWidth={headerLabelWidth}
                         headerStatsWidth={headerStatsWidth}
                         layout={layout}
@@ -2623,6 +2631,7 @@ export function DiffPane({
                         sourceStatus={sourceStatusByFileId[file.id]}
                         tabWidth={tabWidth}
                         hunkGap={hunkGap}
+                        visibleHunkIndexes={visibleHunkIndexesByFileId?.get(file.id)}
                         wrapLines={wrapLines}
                         theme={theme}
                         hoverActive={hoveredFileId === null || hoveredFileId === file.id}
@@ -2635,7 +2644,7 @@ export function DiffPane({
                         }
                         visibleBodyBounds={visibleBodyBoundsByFile.get(file.id)}
                         onHover={() => setHoveredFileForRowActions(file.id)}
-                        onMouseScroll={clearAddNoteHoverForScroll}
+                        onMouseScroll={clearAddNoteHover}
                         onFileViewRowFailure={onFileViewRowFailure}
                         onActiveAddNoteAffordanceChange={
                           onActiveAddNoteAffordanceChange

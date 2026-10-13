@@ -36,6 +36,7 @@ Writing one with a coding agent? `hunk skill path hunk-extensions` prints a bund
 - The two repo-local sources are one group: one trust decision, one sort order.
 - A directory source matches `*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs` directly inside it, plus one level of folder extensions.
 - `--no-extensions` disables user extensions for one run; nothing on disk is read.
+- `[extensions] disabled` and `--disable-extension <id>` disable one exact extension before its module or factory runs; `--enable-extension <id>` overrides a configured disable for one run.
 - `--extension` is explicit intent: it loads immediately, without a trust prompt, even from inside the reviewed repo — so never pass a path you have not read.
 
 ### Folder extensions
@@ -68,20 +69,28 @@ Ids start with a letter or digit, then letters, digits, `-`, or `_`. `hunk`, `gi
 
 ## Installing shared extensions
 
-Extensions are shared as plain git repositories. `hunk extension install` clones one into a managed directory under `~/.config/hunk/extensions/installed/`, verifies it contains an extension, installs its npm dependencies when it declares any, and records the source and commit:
+Extensions are shared as Git repositories or npm packages. `hunk extension install` installs either source under `~/.config/hunk/extensions/installed/`, validates its entries, and records the requested source and resolved commit or package version:
 
 ```bash
 hunk extension install acme/hunk-word-diff          # GitHub shorthand
 hunk extension install acme/hunk-word-diff@v1.2.0   # pin a tag, branch, or commit
 hunk extension install git:codeberg.org/acme/ext    # any host; https:// is assumed
 hunk extension install ~/dev/hunk-word-diff         # a local checkout, for testing
+hunk extension install npm:@acme/hunk-word-diff
+hunk extension install npm:@acme/hunk-word-diff@1.2.0
+hunk extension install 'npm:@acme/hunk-word-diff@^1.2.0'
+hunk extension install npm:@acme/hunk-word-diff@next
 ```
 
 - `hunk extension list` shows every managed install with its version, commit, and source.
-- `hunk extension update [name]` re-clones one install (or all of them) from its recorded source; an `@ref` pin stays put until you re-install with a different one.
+- `hunk extension update [name]` refreshes one install (or all of them) from its recorded source. Git refs and exact npm versions stay pinned; npm ranges and tags are re-resolved.
 - `hunk extension remove <name>` deletes the install and its record. Hand-copied extensions in `~/.config/hunk/extensions/` are never touched.
 
-Installing is the consent step: extensions run with your full user permissions, so a fresh install asks for confirmation (or takes `--yes`) after naming the repository. Only install repositories you trust. Managed installs then load through the global group above — same precedence, no further prompts.
+Installing is the consent step: extensions run with your full user permissions, so a fresh install asks for confirmation (or takes `--yes`) after naming the source. Only install sources you trust. Managed installs then load through the global group above — same precedence, no further prompts.
+
+npm installs require Node.js/npm on PATH, honor registry/auth configuration from the launch project's `.npmrc`, user/global configuration, and environment, and isolate each package's dependencies. Project credentials are forwarded during acquisition, not saved into the managed install. Hunk forces local managed installation even when npm is configured globally. Hoisted helpers receive the same host APIs and React instance as the entry. Lifecycle scripts and automatic peer installation are disabled. If npm attempts a hook despite suppression, Hunk blocks it and fails the staged install. Ship ready-to-load files; packages requiring install-time builds are not supported automatically.
+
+Use `npm:<package>` from `list` to update or remove npm packages, for example `hunk extension update npm:@acme/hunk-word-diff`. npm install directories and single-entry extension IDs contain a readable package prefix plus its SHA-256 digest; this keeps scoped names distinct and IDs stable across versions. Multi-entry packages retain entry-derived IDs. Failed installs or updates do not replace the previous working directory.
 
 Community extensions are listed at [hunk.dev/extensions](/extensions/), and the full tail is the [`hunk-extension` topic on GitHub](https://github.com/topics/hunk-extension).
 
@@ -94,15 +103,17 @@ A publishable extension repository is the folder-extension layout at the reposit
 3. Tag releases so users can pin with `@v1.2.0`.
 4. Push to any git host and add the **`hunk-extension`** GitHub topic, then open a pull request to list it on [hunk.dev/extensions](/extensions/).
 
+To publish on npm, explicitly declare `hunk.extensions`, ensure every entry is a file inside the package, check shipped files with `npm pack --dry-run`, and run `npm publish`. Host-provided packages belong in peer or development dependencies, not runtime dependencies.
+
 Test the exact layout users will get with `hunk extension install /path/to/checkout`, or load it for one run with `hunk diff --extension /path/to/checkout`.
 
 ## Bundled extensions
 
-Hunk's Git, Jujutsu, Sapling, and file-navigation pane use the same public extension API. Bundled extensions differ from yours in three ways:
+Hunk's Git, Jujutsu, Sapling, `hunk gh`, file-navigation, and content-search features use the same public extension API. Bundled extensions differ from yours in three ways:
 
-- statically imported, so they load before config resolution picks the session's VCS
+- compiled into Hunk and loaded by the lifecycle that owns each capability
 - implicitly trusted, with no `[extension.<id>]` config table
-- still loaded under `--no-extensions` and `[extensions] enabled = false` — those switches triage extensions _you_ installed
+- still loaded under `--no-extensions` and `[extensions] enabled = false` — those switches triage extensions _you_ installed; selectable bundled capabilities use host-owned ids such as `hunk.gh`
 
 ## Trust
 
@@ -133,9 +144,11 @@ Extensions run with your shell permissions. For reviewed files, prefer [`ctx.wor
 hunk diff --extension ./path/to/entry.ts   # load one entry file for a review (repeatable)
 hunk diff --extension ./my-ext             # a folder extension: loads ./my-ext/index.ts
 hunk --extension ./my-ext cli-tools status # run an extension-provided top-level command
-hunk --extension ./examples/extensions/github-pr gh 123 # fetch and review a GitHub PR
+hunk gh pr 123                                  # bundled GitHub review command
 hunk --no-extensions cli-tools status      # hard-disable lookup and importing
 hunk diff --no-extensions                  # disable user extensions for this review
+hunk --disable-extension hunk.gh gh pr 123 # disable one extension for this run
+hunk --enable-extension hunk.gh gh pr 123  # override config for this run
 ```
 
 ```toml
@@ -143,12 +156,13 @@ hunk diff --no-extensions                  # disable user extensions for this re
 [extensions]
 enabled = true                      # false disables loading for this layer
 paths = ["~/dev/hunk-ext/index.ts"] # extra entry files or directories
+disabled = ["hunk.gh", "my-extension"] # exact selection ids
 
 [extension.my-extension]            # opaque payload handed to that extension
 some_key = "some value"
 ```
 
-`[extensions] enabled` layers like every other option (repo config overrides user config); `--no-extensions` is a hard off switch no config layer can re-enable. Extension-provided CLI trees use [`registerCliCommand`](/docs/extend/extension-api/#hunkregisterclicommandcommand-handler); bare help stays static, while `hunk <extension-command> --help` belongs to the extension. The dependency-free [`github-pr` example](https://github.com/modem-dev/hunk/tree/main/examples/extensions/github-pr) demonstrates direct HTTP preprocessing, cancellation, temporary input ownership, and one-time delegation. `[extension.<id>]` tables pass through to the extension uninterpreted — see [`hunk.config`](/docs/extend/extension-api/#hunkconfig) for the merge rules and their caveats.
+`[extensions] enabled` layers like every other option (repo config overrides user config); `--no-extensions` is a hard off switch no config layer can re-enable. User and repository `disabled` lists combine as a union, while `--enable-extension` is the only one-run override. Disabled user extensions are filtered before import and trust prompting. Extension-provided CLI trees use [`registerCliCommand`](/docs/extend/extension-api/#hunkregisterclicommandcommand-handler); bare help stays static, while `hunk <extension-command> --help` belongs to the extension. The dependency-free bundled [`@hunk/gh` extension](https://github.com/modem-dev/hunk/tree/main/packages/hunk-gh/src) demonstrates direct HTTP preprocessing, cancellation, temporary input ownership, and one-time delegation. `[extension.<id>]` tables pass through to the extension uninterpreted — see [`hunk.config`](/docs/extend/extension-api/#hunkconfig) for the merge rules and their caveats.
 
 ## A complete example
 

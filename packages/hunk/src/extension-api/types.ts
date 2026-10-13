@@ -21,7 +21,7 @@
  * Extensions can branch on `hunk.apiVersion` so a newer Hunk can keep loading
  * older extensions without guessing at their expectations.
  */
-export const HUNK_EXTENSION_API_VERSION = 25;
+export const HUNK_EXTENSION_API_VERSION = 31;
 export type HunkExtensionApiVersion = typeof HUNK_EXTENSION_API_VERSION;
 
 export type ExtensionNotifyType = "info" | "warning" | "error";
@@ -257,6 +257,8 @@ export interface ExtensionKeyboardModeContext extends ExtensionContext {
   readonly commands: ExtensionCommandControls;
   /** Invalidate prepared line highlights, e.g. after a prompt submit changes them. */
   readonly highlights: ExtensionLineHighlightControls;
+  /** This extension's items on the status line, e.g. a mode's live buffer or count. */
+  readonly statusLine: ExtensionStatusLineControls;
   /**
    * Controls scoped to this extension and activation.
    *
@@ -309,13 +311,54 @@ export interface ExtensionFileViewSourceRange {
   readonly range: readonly [number, number];
 }
 
+/**
+ * Declares complete lexical context for syntax-painted file-view spans.
+ *
+ * Hunk treats highlighting as optional paint: pending, unsupported, oversized, or failed work keeps
+ * the ordinary symbolic spans and never invalidates layout geometry.
+ */
+export interface ExtensionFileViewCodeDocument {
+  /** Stable and unique within this layout result. */
+  readonly id: string;
+  /**
+   * Complete code retained as multiline lexical context. Hunk normalizes CRLF and CR to LF and
+   * strips terminal controls line by line before validating span references.
+   */
+  readonly text: string;
+  /** Syntax language override; omitted values use the reviewed file's detected language. */
+  readonly language?: string;
+}
+
+/** One exact code-document slice painted through Hunk's active syntax theme. */
+export interface ExtensionFileViewSyntaxReference {
+  readonly documentId: string;
+  /** One-based line in the declared code document. */
+  readonly line: number;
+  /**
+   * Zero-based, half-open UTF-16 columns in Hunk's normalized terminal-safe line. Omitted ranges
+   * reference the complete line.
+   */
+  readonly range?: readonly [number, number];
+}
+
 /** One symbolic run in a host-rendered file-view row. */
 export interface ExtensionFileViewSpan {
+  /**
+   * Authoritative terminal-safe text. Horizontal tabs remain UTF-16 source coordinates for syntax
+   * references and pass through to OpenTUI, which displays each at a fixed two-cell width.
+   */
   readonly text: string;
   /** A generic semantic color the host maps to its active terminal theme at paint time. */
   readonly tone?: "muted" | "accent" | "accent-muted" | "syntax" | "added" | "removed";
   /** Theme-independent terminal emphasis. */
   readonly attributes?: readonly ("bold" | "italic" | "underline" | "strikethrough")[];
+  /**
+   * Requests host-owned syntax paint for an exact slice of a declared code document. The retained
+   * terminal-safe `text` must equal that complete line or range. A resolved syntax foreground
+   * overrides `tone` for that token; unstyled gaps and unavailable highlighting keep `tone`, while
+   * authored `attributes` apply to every resulting run. Highlighting never changes text or geometry.
+   */
+  readonly syntax?: ExtensionFileViewSyntaxReference;
 }
 
 /** Bounded paint-only props handed to a custom file-view row component. */
@@ -359,6 +402,8 @@ export interface ExtensionFileViewRow {
 /** The deterministic, symbolic layout returned by a file-view extension. */
 export interface ExtensionFileViewLayout {
   readonly rows: readonly ExtensionFileViewRow[];
+  /** Complete code documents referenced by syntax-painted spans. */
+  readonly codeDocuments?: readonly ExtensionFileViewCodeDocument[];
   /** Inclusive row extents ordered to correspond to `input.file.hunks`. */
   readonly hunkRows: readonly {
     readonly startRow: number;
@@ -865,6 +910,154 @@ export interface ExtensionVcsHistoryCapability {
   ): ExtensionVcsHistoryRangeReviewAction | Promise<ExtensionVcsHistoryRangeReviewAction>;
 }
 
+/** Describe an observed fact without turning unavailable metadata into a clean result. */
+export type ExtensionVcsStatusFact<T> =
+  | { state: "ready"; value: T }
+  | { state: "unknown"; reason: string }
+  | { state: "error"; message: string };
+
+export type ExtensionVcsStatusPathState =
+  | "unchanged"
+  | "modified"
+  | "added"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "type-changed"
+  | "unmerged"
+  | "untracked";
+
+/** Keep index and working-copy changes independent; providers without an index omit it. */
+export interface ExtensionVcsStatusPath {
+  path: string;
+  previousPath?: string;
+  index?: ExtensionVcsStatusPathState;
+  worktree: ExtensionVcsStatusPathState;
+  conflict: boolean;
+  submodule?: { commitChanged: boolean; trackedChanges: boolean; untrackedChanges: boolean };
+}
+
+export type ExtensionVcsStatusHead =
+  | { kind: "branch"; name: string; revisionId: string }
+  | { kind: "detached"; revisionId: string }
+  | { kind: "unborn"; name: string };
+
+/** Report only locally observable fetch metadata, never the status observation time. */
+export type ExtensionVcsStatusFetch = ExtensionVcsStatusFact<{
+  timestamp: string;
+  provenance: "local-fetch-head-mtime";
+}>;
+
+export type ExtensionVcsStatusUpstream =
+  | { kind: "none" | "detached" | "unborn" }
+  | { kind: "missing"; name: string }
+  | {
+      kind: "tracked";
+      name: string;
+      ahead: number;
+      behind: number;
+      fetch: ExtensionVcsStatusFetch;
+    };
+
+export type ExtensionVcsStatusOperation = "merge" | "rebase" | "cherry-pick" | "revert" | "bisect";
+
+/** Identify one worktree without changing the process cwd or launch extension authority. */
+export interface ExtensionVcsStatusWorktree {
+  id: string;
+  path: string;
+  /** Opaque same-repository identity shared by linked worktrees. */
+  repositoryId: string;
+}
+
+/** Contain a sibling failure to its own row; absent counts never mean clean. */
+export interface ExtensionVcsStatusWorktreeSummary {
+  worktree: ExtensionVcsStatusWorktree;
+  branch?: string;
+  detached: boolean;
+  bare: boolean;
+  locked?: string;
+  prunable?: string;
+  inspectable: boolean;
+  status:
+    | {
+        state: "ready";
+        observedAt: string;
+        changedPathCount: number;
+        conflictCount: number;
+        operations: ExtensionVcsStatusFact<ExtensionVcsStatusOperation[]>;
+      }
+    | { state: "unavailable" | "error"; message: string };
+}
+
+export interface ExtensionVcsStatusSiblings {
+  /** Unique worktree ids and paths, all sharing the inspected repositoryId. */
+  worktrees: ExtensionVcsStatusWorktreeSummary[];
+  /** More worktrees exist than the bounded scan returned. */
+  truncated: boolean;
+}
+
+/** Publish a bounded, JSON-safe current-worktree observation before optional sibling reads. */
+export interface ExtensionVcsStatusSnapshot {
+  schemaVersion: 1;
+  observedAt: string;
+  worktree: ExtensionVcsStatusWorktree;
+  /** Opaque source/target validation token, not a content attestation for a future live diff. */
+  token: string;
+  head: ExtensionVcsStatusHead;
+  upstream: ExtensionVcsStatusFact<ExtensionVcsStatusUpstream>;
+  operations: ExtensionVcsStatusFact<ExtensionVcsStatusOperation[]>;
+  paths: ExtensionVcsStatusPath[];
+  /** Unique destination paths, not overlapping index/worktree group totals. */
+  changedPathCount: number;
+  /**
+   * Offer only supported semantic ids: "staged" (index comparison) and "unstaged"
+   * (working-copy comparison). Labels are provider-owned. Providers without an
+   * index offer only "unstaged" and omit paths[].index; ids are not opaque.
+   */
+  reviewActions: { id: "staged" | "unstaged"; label: string }[];
+  siblings: ExtensionVcsStatusFact<ExtensionVcsStatusSiblings> | { state: "loading" };
+}
+
+/** Preserve full-comparison inputs without permitting status to narrow them to pathspecs. */
+export type ExtensionVcsStatusReviewInput =
+  | (Omit<Extract<ExtensionVcsDiffInput, { rangeEndpoints?: never }>, "pathspecs"> & {
+      pathspecs?: never;
+    })
+  | (Omit<
+      Extract<ExtensionVcsDiffInput, { rangeEndpoints: ExtensionVcsRangeEndpoints }>,
+      "pathspecs"
+    > & {
+      pathspecs?: never;
+    });
+
+/** Offer read-only status independently of history or any provider's index semantics. */
+export interface ExtensionVcsStatusCapability {
+  /** Reject outside-repository/no-worktree reads; never silently select a different provider. */
+  read(
+    input: { targetPath?: string },
+    context: ExtensionVcsLoadContext,
+  ): Promise<ExtensionVcsStatusSnapshot>;
+  /** Bound concurrency and return partial failures. The caller owns cancellation/generations. */
+  readSiblings(
+    snapshot: ExtensionVcsStatusSnapshot,
+    context: ExtensionVcsLoadContext,
+  ): Promise<ExtensionVcsStatusSiblings>;
+  /** Revalidate target/token and the offered semantic id; reject pathspecs, even an empty list. */
+  planReview(
+    snapshot: ExtensionVcsStatusSnapshot,
+    actionId: string,
+    context: ExtensionVcsLoadContext,
+  ): Promise<{
+    cwd: string;
+    input: ExtensionVcsStatusReviewInput;
+  }>;
+  /** Cover working-copy and shared/per-worktree metadata; hosts retain periodic polling. */
+  watchPlan?(
+    snapshot: ExtensionVcsStatusSnapshot,
+    context: ExtensionVcsLoadContext,
+  ): Promise<ExtensionVcsWatchPlan>;
+}
+
 /** Stash review request, as extension adapters receive it. */
 export interface ExtensionVcsStashShowInput {
   kind: "stash-show";
@@ -1117,6 +1310,8 @@ export interface ExtensionVcsAdapter {
   operations?: ExtensionVcsOperations;
   /** Optional static/interactive history enumeration capability. */
   history?: ExtensionVcsHistoryCapability;
+  /** Optional read-only workspace status and sibling inspection capability. */
+  status?: ExtensionVcsStatusCapability;
   /**
    * Where this adapter sits in detection order; higher is consulted first.
    *
@@ -1219,7 +1414,8 @@ export interface ExtensionReviewNavigation {
  *
  * Actions stay valid for as long as the component is mounted.
  */
-export interface ExtensionPaneActions extends ExtensionReviewNavigation {
+export interface ExtensionPaneActions
+  extends ExtensionReviewNavigation, ExtensionReviewPresentationControls {
   /** Copy text through the terminal clipboard integration, returning false when unavailable. */
   copyText(text: string): boolean;
   /** Show one toast, attributed to the owning extension. */
@@ -1311,6 +1507,8 @@ export interface ExtensionPaneAvailabilityContext {
 export interface ExtensionPaneProps {
   /** Immutable review-source metadata, or null for ordinary reviews. */
   readonly review: ExtensionReviewDescriptor | null;
+  /** Opaque current review generation for generation-scoped presentation requests. */
+  readonly reviewGeneration: string | null;
   readonly files: readonly ExtensionDiffFile[];
   readonly selectedFileId: string | null;
   readonly selectedHunkIndex: number | null;
@@ -1613,13 +1811,16 @@ export interface ExtensionPaneControls {
    * resolve replacement slots; execute `hunk.view.toggleFilesPane` through
    * command controls for the active files role.
    *
-   * Opening a left/right pane (here, or via `toggle`) also reveals the sidebar
-   * area when it is hidden, so the open is never silent.
+   * Opening a left/right pane (here, or via `toggle`) reveals only its own
+   * edge when responsively hidden, without changing the opposite edge.
    */
   open(viewId: string): void;
   close(viewId: string): void;
   toggle(viewId: string): void;
+  /** Report the logical open preference, even when layout or availability hides the pane. */
   isOpen(viewId: string): boolean;
+  /** Report whether the pane occupies the current committed layout; stale controls return false. */
+  isVisible(viewId: string): boolean;
 }
 /** @deprecated Use ExtensionPaneControls. */
 export type ExtensionSidebarControls = ExtensionPaneControls;
@@ -1741,6 +1942,13 @@ export interface ExtensionReviewSelection {
     readonly side: ExtensionFileSide;
     readonly line: number;
   } | null;
+  /**
+   * The currently visible files in review order: the same frozen views a
+   * pane's `files` prop carries, so a command can act on the whole review the
+   * user sees without shadow-tracking `changeset_loaded`. `file` is one of
+   * these entries or `null`.
+   */
+  readonly files: readonly ExtensionDiffFile[];
 }
 
 /** One stable reviewed file in an authoritative extension snapshot. */
@@ -1821,8 +2029,32 @@ export interface ExtensionReviewSnapshot {
   readonly notes: readonly ExtensionReviewSnapshotNote[];
 }
 
+/** Runtime file and hunk targets retained by one transient extension presentation. */
+export interface ExtensionReviewPresentationScopeFile {
+  /** Runtime file identity valid only for `generation`. */
+  readonly fileId: string;
+  /** Hunk indexes in the file's canonical render order. */
+  readonly hunkIndexes: readonly number[];
+}
+
+/** One extension-owned, transient projection of the current review generation. */
+export interface ExtensionReviewPresentationScope {
+  /** Generation returned by `review.snapshot()`. */
+  readonly generation: string;
+  /** Files and hunks to retain in the host review presentation. */
+  readonly files: readonly ExtensionReviewPresentationScopeFile[];
+}
+
+/** Controls for one extension's generation-scoped presentation projection. */
+export interface ExtensionReviewPresentationControls {
+  /** Replace this extension's scope; returns false for stale or invalid targets. */
+  setPresentationScope(scope: ExtensionReviewPresentationScope): boolean;
+  /** Clear only this extension's owned scope. */
+  clearPresentationScope(): void;
+}
+
 /** Read the authoritative review while one extension command retains authority. */
-export interface ExtensionReviewControls {
+export interface ExtensionReviewControls extends ExtensionReviewPresentationControls {
   /**
    * Capture the current immutable review state, or return null after a reload or host teardown.
    * Call again before irreversible asynchronous work and compare generation plus stateRevision.
@@ -1912,6 +2144,71 @@ export interface ExtensionDialogs {
   select(options: ExtensionSelectOptions): Promise<string | null>;
   /** Resolves the submitted text, or null on cancel/escape. */
   input(options: ExtensionInputOptions): Promise<string | null>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Status line                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/** One symbolic text run in a host-painted status item. */
+export type ExtensionStatusSpan = Pick<ExtensionFileViewSpan, "text" | "tone" | "attributes">;
+
+/**
+ * One persistent, text-only contribution to the bottom status row.
+ *
+ * Items are declarative: the host measures them without a theme, paints them with the active
+ * one, and decides what survives a narrow terminal. Setting an item keeps the row on screen,
+ * exactly like a non-empty file filter does, so clear items that should not cost a row while
+ * idle.
+ */
+export interface ExtensionStatusItem {
+  /** Identifies the item within its extension; `<extensionId>:<id>` globally. */
+  id: string;
+  spans: readonly ExtensionStatusSpan[];
+  /** Defaults to "left". Right items sit beside the host's keyboard-mode badge. */
+  alignment?: "left" | "right";
+  /** Higher survives longer when the row overflows. Defaults to 0. */
+  priority?: number;
+}
+
+/**
+ * Write to, or clear, this extension's items on the status line.
+ *
+ * Items persist across ordinary content reloads and clear when the extension registry is
+ * replaced or the review unmounts. A malformed item — a blank `id`, a non-array `spans`, a
+ * span without string `text` — is a programming error and throws, like malformed dialog
+ * options.
+ */
+export interface ExtensionStatusLineControls {
+  /** Set or replace one item. Empty `spans` hides it without forgetting its slot. */
+  set(item: ExtensionStatusItem): void;
+  clear(id: string): void;
+}
+
+export interface ExtensionPromptLineOptions {
+  /** Painted before the input, e.g. "/" or "filter:". Not part of the value. */
+  prefix?: string;
+  placeholder?: string;
+  initial?: string;
+  /** Called on every edit, for consumers that react while the user types. */
+  onChange?(value: string): void;
+}
+
+/**
+ * Ask the user for one line of text inline on the status row.
+ *
+ * The prompt is a real focused input drawn by Hunk with a cursor: Enter resolves the text,
+ * Escape clears a non-empty buffer first and cancels with `null` second. It sits with the
+ * file filter in key routing — after dialogs and menus, before session keyboard modes and the
+ * command table — so a prompt-shaped interaction needs no keyboard mode. One prompt is open
+ * at a time; a second request queues behind the first. A session reload cancels open and
+ * queued prompts, and a request during teardown resolves `null` immediately. Prompts from
+ * installed extensions carry the same `ext` marker toasts and dialogs use. A throwing
+ * `onChange` is reported once and the prompt continues.
+ */
+export interface ExtensionPromptControls {
+  /** Resolves the submitted text, or null on Escape / reload / teardown. */
+  line(options: ExtensionPromptLineOptions): Promise<string | null>;
 }
 
 /** One whole-document replacement an extension asks the host to write. */
@@ -2096,6 +2393,15 @@ export interface ExtensionCommandContext extends ExtensionContext {
    * between. A reload expires retained controls and returns cancel values.
    */
   readonly dialogs: ExtensionDialogs;
+  /** This extension's persistent items on the status line. */
+  readonly statusLine: ExtensionStatusLineControls;
+  /**
+   * Ask for one line of text inline on the status row and await it.
+   *
+   * Scoped like `dialogs`: valid while this review generation remains current, cancelled by
+   * a reload.
+   */
+  readonly prompts: ExtensionPromptControls;
   /**
    * Read reviewed files, and write them back to the working tree with the
    * user's consent.
@@ -2141,6 +2447,8 @@ export interface ExtensionEventContext extends ExtensionContext {
   readonly navigation: ExtensionReviewNavigation;
   /** Ask attributed, FIFO-queued questions from lifecycle and bus handlers. */
   readonly dialogs: ExtensionDialogs;
+  /** This extension's persistent items on the status line, e.g. a count kept on `file_viewed`. */
+  readonly statusLine: ExtensionStatusLineControls;
   /** Request a host-owned reload after an external service changes the reviewed inputs. */
   readonly review: ExtensionReviewReloadControls;
   events: Pick<ExtensionEventBus, "emit">;

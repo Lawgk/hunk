@@ -7,8 +7,8 @@ The extension factory receives one API object. Registration calls are only valid
 
 ## `hunk.apiVersion`
 
-The API generation this Hunk speaks (currently `25`). Branch on it if you want
-one file to support several Hunk versions. Version 25 adds Promise-returning watch signatures and watch cancellation; version 24 adds review metadata to VCS patch results and short display revisions to commit descriptors; version 23 adds canonical unified-layout fields while preserving the previous event vocabulary; version 22 adds frame-derived pane preferred sizing, non-resizable dynamic panes, and commit-history paint tokens; version 21 adds optional inclusive history-range review
+The API generation this Hunk speaks (currently `28`). Branch on it if you want
+one file to support several Hunk versions. Version 28 adds host-owned syntax highlighting for file-view code documents; version 27 adds `ctx.selection.files`, the visible files in review order; version 26 adds the status line (`ctx.statusLine` items and `ctx.prompts.line()` inline prompts); version 25 adds Promise-returning watch signatures and watch cancellation; version 24 adds review metadata to VCS patch results and short display revisions to commit descriptors; version 23 adds canonical unified-layout fields while preserving the previous event vocabulary; version 22 adds frame-derived pane preferred sizing, non-resizable dynamic panes, and commit-history paint tokens; version 21 adds optional inclusive history-range review
 planning and bounded comparison commit summaries; version 20 adds optional commit timestamps to review
 metadata, pane clipboard actions, and the `theme.copyAction` paint token; version 19 adds provider-owned history enumeration and review planning; version 18 lets
 lifecycle and custom-event handlers request a host-owned review reload; version 17 adds structured review metadata to delegated
@@ -99,17 +99,17 @@ naming the bad token, so keep both to one short line:
 hunk: Unknown command: nosuchthing
 
 Extension commands available here:
-hunk gh <number|owner/repo#number|pull-request-url> [--repo <owner/repo>] — Review a GitHub pull request
+hunk gh <pr|commit|compare> <target> [--repo <owner/repo>] — Review GitHub-hosted changes
 ```
 
 For a complete implementation, see the dependency-free
-[`github-pr` example](https://github.com/modem-dev/hunk/tree/main/examples/extensions/github-pr).
+bundled [`@hunk/gh` extension](https://github.com/modem-dev/hunk/tree/main/packages/hunk-gh/src).
 It fetches GitHub PR diffs directly, delegates a temporary patch with
 restrictive POSIX modes (and inherited temporary-directory ACLs on Windows)
 into Hunk, and cleans the patch up on shutdown:
 
 ```bash
-hunk --extension ./examples/extensions/github-pr gh 123
+hunk gh pr 123
 ```
 
 ## `hunk.configureSession(options)`
@@ -420,7 +420,7 @@ Subscribe to a lifecycle or UI event. Handlers may be async; Hunk never blocks t
 - Starting with extension API v23, `layout_changed` adds `canonicalMode` and `canonicalLayout`, which use `"unified"`. The original `mode` and `layout` fields remain available for compatibility and continue to report `"stack"` where their canonical counterparts report `"unified"`. To preserve exhaustive existing source, `ExtensionLayoutMode` and `ExtensionResolvedLayout` retain their pre-v23 shapes; new extensions use `ExtensionCanonicalLayoutMode` and `ExtensionCanonicalResolvedLayout`. Hunk will keep `"stack"` and the legacy fields until a separately announced major API revision.
 - `selection_changed` is trailing-debounced: holding `[`/`]` retargets many times a second, and handlers only care where the user landed. `fileId` and `hunkIndex` are `null` when nothing is selected.
 - `hunk_viewed` fires when the settled `(file, hunk)` pair changes, including `[`/`]` inside one file. Current-line movement within a hunk does not emit it. `file_viewed` still fires only when the selected file object changes.
-- `command_executed` reports stable command ids after terminal dispatch from a key, menu, or `ctx.commands.execute`. For a renamed command, `commandId` preserves the deprecated identity and `canonicalCommandId` names its replacement. Detached async extension work may still be running; the event observes the accepted action rather than promise settlement. It follows remapped keys; browser/session review intents and widget-owned Escape, Enter, note-editor Ctrl-S, and F10 menu navigation are not terminal commands.
+- `command_executed` reports stable command ids after terminal dispatch from a key, menu, or `ctx.commands.execute`. For a renamed command, `commandId` preserves the deprecated identity and `canonicalCommandId` names its replacement. Detached async extension work may still be running; the event observes the accepted action rather than promise settlement. It follows remapped keys; browser/session review intents and widget-owned Escape, Enter, and F10 menu navigation are not terminal commands. The note composer’s save shortcut is `hunk.review.saveNote` and does emit this event.
 - `session_reload`'s `reason` is `"watch"`, `"daemon"` (an agent command through the session broker), `"extension"` (an in-process extension request), or `"manual"`.
 - `note_created` and `note_edited` cover notes authored in Hunk's own UI this session. Agent session comments do not emit them, and a reload may remap or drop notes. Use them for incremental reactions.
 - `note_changed` is store-backed: `kind` is `"created"`, `"updated"`, or `"removed"`, and `note` matches the snapshot shape command handlers read through `ctx.review.snapshot()`. It includes agent session comments and user deletes; drafts never appear. Reloads that remap notes do not emit it — use `session_reload` to invalidate extension-owned state and read the complete current record from a later command snapshot.

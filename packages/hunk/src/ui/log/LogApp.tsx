@@ -2,14 +2,16 @@ import type { KeyEvent, MouseEvent as TuiMouseEvent } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { basename } from "node:path";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { STATUS_COMMAND_NAMES } from "../../core/run/statusCommandCatalog";
 import { APP_COMMAND_NAMES } from "../../core/run/commandCatalog";
+import { DOCUMENT_COMMAND_NAMES } from "../../core/run/documentCommandCatalog";
 import type { PersistedViewPreferences } from "../../core/run/config";
 import type {
   ExtensionVcsHistoryCommit,
   ExtensionVcsHistoryRangeSelection,
 } from "../../extension-api/types";
 import { sanitizeTerminalLine } from "../../lib/terminalText";
-import { resolveExtensionCommands, resolveExtensionSessionOptions } from "../../extensions/apply";
+import { resolveExtensionSessionOptions } from "../../extensions/apply";
 import { HelpDialog } from "../components/chrome/HelpDialog";
 import { MenuBar } from "../components/chrome/MenuBar";
 import { MenuDropdown } from "../components/chrome/MenuDropdown";
@@ -27,10 +29,14 @@ import {
 import { fitText, measureTextWidth } from "../lib/text";
 import { handleViewPreferenceQuitPromptKey } from "../lib/viewPreferenceQuitKeys";
 import type { ThemeController } from "../theme/controller";
+import { StatusLine } from "../statusLine/StatusLine";
+import type { StatusItem } from "../statusLine/types";
+import { useStatusLine } from "../statusLine/useStatusLine";
 import type { InteractiveHistoryRuntime } from "../history/types";
 import type { LogController } from "./controller";
 import { dispatchAppCommand, executeAppCommand, findAppCommandById } from "../lib/appCommands";
 import { resolveCommandKeys } from "../lib/keymap";
+import { buildSessionCommands } from "../lib/sessionRegistrations";
 import {
   buildHistoryCommands,
   buildHistoryHelpSections,
@@ -78,6 +84,8 @@ export function LogApp({
   themeController,
   useColor,
   quitScheduler,
+  returnToStatus = false,
+  transparentBackground = false,
 }: {
   controller: LogController;
   runtime: InteractiveHistoryRuntime;
@@ -87,6 +95,9 @@ export function LogApp({
   themeController: ThemeController;
   useColor: boolean;
   quitScheduler?: ViewPreferenceQuitScheduler;
+  returnToStatus?: boolean;
+  /** Retain the caller's resolved surface preference without changing the shared palette. */
+  transparentBackground?: boolean;
 }) {
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const terminal = useTerminalDimensions();
@@ -110,8 +121,9 @@ export function LogApp({
   const themeSelector = useThemeSelectorController({
     onTransientNotice: setTransientNotice,
     themeController,
-    transparentBackground: false,
+    transparentBackground,
   });
+  const { store: statusLineStore, snapshot: statusLineState } = useStatusLine();
   const terminalThemeMode = renderer.themeMode ?? "dark";
   const theme = useColor
     ? themeSelector.activeTheme
@@ -137,7 +149,7 @@ export function LogApp({
     },
     configPath: runtime.viewPreferencesConfigPath,
     pagerMode: false,
-    promptSaveViewPreferences: runtime.promptSaveViewPreferences,
+    promptSaveViewPreferences: runtime.promptSaveViewPreferences && !returnToStatus,
     transientViewPreferences: resolveExtensionSessionOptions(
       runtime.extensionSession.current.registry,
     ).transientViewPreferences,
@@ -258,9 +270,12 @@ export function LogApp({
     await openSelected(undefined, true);
   };
   const inactiveHistoryCommandNames = useMemo(() => {
-    const names = new Set(APP_COMMAND_NAMES);
-    for (const registered of resolveExtensionCommands(runtime.extensionSession.current.registry)
-      .commands) {
+    const names = new Set([
+      ...APP_COMMAND_NAMES,
+      ...DOCUMENT_COMMAND_NAMES,
+      ...STATUS_COMMAND_NAMES,
+    ]);
+    for (const registered of buildSessionCommands(runtime.extensionSession.current.registry)) {
       names.add(`${registered.extensionId}.${registered.command.id}`);
     }
     return names;
@@ -274,6 +289,14 @@ export function LogApp({
       }),
     [inactiveHistoryCommandNames, runtime.keybindings],
   );
+  /** Open the host prompt on the status line; Enter selects the next match of the typed query. */
+  const beginSearch = () => {
+    void statusLineStore
+      .requestPrompt({ prefix: "/", placeholder: "search commits", initial: snapshot.search })
+      .then((query) => {
+        if (query !== null) void controller.search(query);
+      });
+  };
   const commandHandlers: HistoryCommandHandlers = {
     "hunk.history.openSelection": () => void requestOpenSelected(),
     "hunk.history.copyRevision": () => copySelected(),
@@ -304,7 +327,7 @@ export function LogApp({
     "hunk.history.halfPageDown": () => void controller.halfPage(1, viewportBodyHeight),
     "hunk.history.jumpToFirst": () => void controller.first(viewportBodyHeight),
     "hunk.history.jumpToLast": () => void controller.last(viewportBodyHeight),
-    "hunk.history.search": () => controller.beginSearch(),
+    "hunk.history.search": () => beginSearch(),
     "hunk.history.nextMatch": () => void controller.findMatch(1, viewportBodyHeight),
     "hunk.history.previousMatch": () => void controller.findMatch(-1, viewportBodyHeight),
     "hunk.history.openFirstParent": () => {
@@ -348,7 +371,7 @@ export function LogApp({
     return {
       kind: "item",
       commandId: id,
-      label: definition.title,
+      label: id === "hunk.app.quit" && returnToStatus ? "Back to status" : definition.title,
       ...(command.keyLabels.length ? { hint: command.keyLabels.join(" / ") } : {}),
       disabled: command.isEnabled ? !command.isEnabled() : false,
       action: () => executeCommand(id),
@@ -532,14 +555,14 @@ export function LogApp({
       consume();
       return;
     }
-    if (snapshot.searchEditing) {
-      if ((key.ctrl && name === "c") || name === "escape") controller.cancelSearch();
-      else if (name === "return" || name === "enter")
-        void controller.finishSearch(1, viewportBodyHeight);
-      else if (name === "backspace") controller.backspaceSearch();
-      else if (/^[^\x00-\x1f\x7f]+$/u.test(sequence)) controller.appendSearch(sequence);
-      else return;
-      consume();
+    const prompt = statusLineStore.getSnapshot().prompt;
+    if (prompt) {
+      // The focused status-line input owns typing, Enter, and the two-step Escape; only the
+      // host's Ctrl-C escape hatch is handled here so a search can never trap the terminal.
+      if (key.ctrl && name === "c") {
+        statusLineStore.cancelPrompt(prompt.id);
+        consume();
+      }
       return;
     }
     if (name === "f10") {
@@ -568,10 +591,26 @@ export function LogApp({
       : terminal.width >= 60
         ? `${visualSelectionKey ? `${visualSelectionKey} select · ` : ""}Enter open · F10 menu`
         : "";
-  const statusTextWidth = Math.max(
-    1,
-    terminal.width - measureTextWidth(statusHint) - (statusHint ? 3 : 2),
-  );
+  const statusText =
+    transientNotice ||
+    snapshot.notice ||
+    ((selection?.count ?? 0) > 1 || snapshot.visualSelectionActive
+      ? `${selection?.count ?? 0} commit${selection?.count === 1 ? "" : "s"} selected`
+      : `${runtime.providerName} · ${snapshot.rows.length}${snapshot.historyDone ? " commits" : "+ commits"}`);
+  const statusItems: StatusItem[] = [
+    { id: "log:status", spans: [{ text: statusText, tone: "muted" }], priority: 1 },
+  ];
+  if (snapshot.search) {
+    statusItems.push({ id: "log:search", spans: [{ text: `/${snapshot.search}`, tone: "muted" }] });
+  }
+  if (statusHint) {
+    statusItems.push({
+      id: "log:hint",
+      spans: [{ text: statusHint, tone: "muted" }],
+      alignment: "right",
+      priority: -1,
+    });
+  }
   return (
     <box
       style={{
@@ -786,32 +825,19 @@ export function LogApp({
           })
         )}
       </box>
-      <box
-        style={{
-          height: 1,
-          width: "100%",
-          flexDirection: "row",
-          justifyContent: "space-between",
-          paddingLeft: 1,
-          paddingRight: 1,
-          backgroundColor: theme.panelAlt,
+      <StatusLine
+        badge={null}
+        snapshot={{
+          items: [...statusItems, ...statusLineState.items],
+          prompt: statusLineState.prompt,
         }}
-        onMouseUp={menu.closeMenu}
-      >
-        <text fg={theme.muted}>
-          {fitText(
-            snapshot.searchEditing
-              ? `/${snapshot.search}`
-              : transientNotice ||
-                  snapshot.notice ||
-                  ((selection?.count ?? 0) > 1 || snapshot.visualSelectionActive
-                    ? `${selection?.count ?? 0} commit${selection?.count === 1 ? "" : "s"} selected`
-                    : `${runtime.providerName} · ${snapshot.rows.length}${snapshot.historyDone ? " commits" : "+ commits"}`),
-            statusTextWidth,
-          )}
-        </text>
-        {statusHint ? <text fg={theme.muted}>{statusHint}</text> : null}
-      </box>
+        terminalWidth={terminal.width}
+        theme={theme}
+        onCloseMenu={menu.closeMenu}
+        onPromptCancel={statusLineStore.cancelPrompt}
+        onPromptInput={statusLineStore.updatePromptValue}
+        onPromptSubmit={statusLineStore.submitPrompt}
+      />
       {menu.activeMenuId && menu.activeMenuSpec ? (
         <MenuDropdown
           activeMenuId={menu.activeMenuId}

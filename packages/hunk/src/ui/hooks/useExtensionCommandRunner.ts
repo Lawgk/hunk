@@ -16,9 +16,11 @@ import type {
   ExtensionKeyboardModeControls,
   ExtensionLineHighlightControls,
   ExtensionPaneControls,
+  ExtensionPromptControls,
   ExtensionReviewControls,
   ExtensionReviewNavigation,
   ExtensionReviewSelection,
+  ExtensionStatusLineControls,
   ExtensionWorkspace,
 } from "../../extension-api/types";
 import type { ExtensionLoadResult, RegisteredCommand } from "../../extensions/types";
@@ -40,7 +42,9 @@ export function useExtensionCommandRunner({
   createLineHighlightControls,
   createNavigation,
   createPaneControls,
+  createPromptControls,
   createReviewControls,
+  createStatusLineControls,
   createWorkspaceControls,
   extensions,
   getSelection,
@@ -55,18 +59,24 @@ export function useExtensionCommandRunner({
   createLineHighlightControls: (extensionId: string) => ExtensionLineHighlightControls;
   createNavigation: (extensionId: string) => ExtensionReviewNavigation;
   createPaneControls: (extensionId: string) => ExtensionPaneControls;
-  createReviewControls: () => ExtensionReviewControls;
+  createPromptControls: (extensionId: string) => ExtensionPromptControls;
+  createReviewControls: (extensionId: string) => ExtensionReviewControls;
+  createStatusLineControls: (extensionId: string) => ExtensionStatusLineControls;
   createWorkspaceControls: (extensionId: string) => ExtensionWorkspace;
   extensions?: ExtensionLoadResult;
   getSelection: () => ExtensionReviewSelection;
 }) {
   return useCallback(
     (registered: RegisteredCommand) => {
+      let review: ExtensionReviewControls | undefined;
       const report = (error: unknown) => {
+        // Cleanup retains the invocation's lease; late failures cannot clear a newer review.
+        review?.clearPresentationScope();
         extensions?.context.notify(commandFailureMessage(registered, error), "warning");
       };
 
       try {
+        review = createReviewControls(registered.extensionId);
         const panes = createPaneControls(registered.extensionId);
         // Build the complete context before invoking the handler; selection is frozen here.
         const context: ExtensionCommandContext = {
@@ -78,9 +88,11 @@ export function useExtensionCommandRunner({
           sidebars: panes,
           fileViews: createFileViewControls(registered.extensionId),
           highlights: createLineHighlightControls(registered.extensionId),
-          review: createReviewControls(),
+          review,
           selection: getSelection(),
           dialogs: createDialogs(registered.extensionId),
+          statusLine: createStatusLineControls(registered.extensionId),
+          prompts: createPromptControls(registered.extensionId),
           workspace: createWorkspaceControls(registered.extensionId),
           navigation: createNavigation(registered.extensionId),
         };
@@ -102,7 +114,9 @@ export function useExtensionCommandRunner({
       createLineHighlightControls,
       createNavigation,
       createPaneControls,
+      createPromptControls,
       createReviewControls,
+      createStatusLineControls,
       createWorkspaceControls,
       extensions,
       getSelection,

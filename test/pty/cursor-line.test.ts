@@ -6,6 +6,7 @@ import {
   dragMouse,
   lineIndexOf,
   measureKeyScroll,
+  pressKeyRepeat,
   rowCellBackgrounds,
   sleep,
 } from "./harness";
@@ -55,6 +56,42 @@ describe("PTY current line", () => {
     } finally {
       session.close();
     }
+  });
+
+  test("scroll-off starts scrolling before the current line reaches the viewport edge", async () => {
+    const fixture = harness.createPinnedHeaderRepoFixture();
+
+    /** Step down until the viewport starts moving and report how many steps that took. */
+    async function stepsBeforeScrolling(scrollOffArgs: string[]) {
+      const session = await harness.launchHunk({
+        args: ["show", "HEAD", "--mode", "unified", ...scrollOffArgs],
+        cwd: fixture.dir,
+        cols: 120,
+        rows: 24,
+      });
+
+      try {
+        await session.waitForText(/View\s+Navigate\s+Agent\s+Help/, { timeout: 15_000 });
+        await session.waitIdle({ timeout: 300 });
+
+        let steps = 0;
+        let scrolled = 0;
+        for (let step = 0; step < 40 && scrolled === 0; step += 1) {
+          scrolled = await measureKeyScroll(session, "j", 12);
+          steps += 1;
+        }
+        return steps;
+      } finally {
+        session.close();
+      }
+    }
+
+    const baselineSteps = await stepsBeforeScrolling(["--scroll-off", "0"]);
+    const defaultSteps = await stepsBeforeScrolling([]);
+    const marginSteps = await stepsBeforeScrolling(["--scroll-off", "5"]);
+
+    expect(baselineSteps - defaultSteps).toBe(5);
+    expect(defaultSteps).toBe(marginSteps);
   });
 
   test("one-cell mouse jitter still selects the exact clicked line", async () => {
@@ -140,8 +177,9 @@ describe("PTY current line", () => {
       }
 
       session.writeRaw(`\x1b[<0;31;${endRow + 1}m`);
-      await session.press("y");
-      await session.waitForText(/Copied selection to clipboard/, { timeout: 5_000 });
+      await harness.pressAndWaitForText(session, "y", /Copied selection to clipboard/, {
+        timeout: 5_000,
+      });
     } finally {
       session.close();
     }
@@ -173,11 +211,16 @@ describe("PTY current line", () => {
       expect(splitLines[lensIndex + 1]).toContain("export const message = 'short';");
       expect(splitLines[lensIndex + 2]).toContain("this is a very long wrapped line");
 
-      await session.press("1");
-      await harness.waitForSnapshot(session, (text) => !text.includes("Current line"), 5_000);
+      await harness.pressAndWaitForSnapshot(
+        session,
+        "1",
+        (text) => !text.includes("Current line"),
+        5_000,
+      );
 
-      await session.press("2");
-      await session.waitForText(/Current line · old above, new below/, { timeout: 5_000 });
+      await harness.pressAndWaitForText(session, "2", /Current line · old above, new below/, {
+        timeout: 5_000,
+      });
     } finally {
       session.close();
     }
@@ -237,8 +280,12 @@ describe("PTY current line", () => {
         scrolled = await measureKeyScroll(session, "j", 12);
       }
       expect(scrolled).toBeGreaterThan(0);
-      // Settle the pinned file-header handoff before measuring the held-key burst.
-      expect(await measureKeyScroll(session, "j", 12)).toBeGreaterThan(0);
+      // The five-row margin starts scrolling before the pinned header hands off. Move past
+      // that transition so the burst measures line steps rather than header geometry changes.
+      for (let step = 0; step < 6; step += 1) {
+        expect(await measureKeyScroll(session, "j", 12)).toBeGreaterThan(0);
+      }
+      expect(await measureKeyScroll(session, "j", 12)).toBe(1);
 
       const before = (await session.text({ immediate: true })).split("\n");
       const anchorIndex = before.findLastIndex((line) => /line\d+ = \d+;/.test(line));
@@ -267,15 +314,20 @@ describe("PTY current line", () => {
 
     try {
       await session.waitForText(/View\s+Navigate\s+Agent\s+Help/, { timeout: 15_000 });
-      await session.press("z");
-      await harness.waitForSnapshot(session, (text) => text.includes("hiddenLine01"), 5_000);
+      await harness.pressAndWaitForSnapshot(
+        session,
+        "z",
+        (text) => text.includes("hiddenLine01"),
+        5_000,
+      );
       // The revealed rows reach navigation one commit after they reach the screen.
       await session.waitIdle({ timeout: 500 });
 
       await session.press("k");
       await session.waitIdle({ timeout: 200 });
-      await session.press("c");
-      const draft = await session.waitForText(/Draft note/, { timeout: 5_000 });
+      const draft = await harness.pressAndWaitForText(session, "c", /Draft note/, {
+        timeout: 5_000,
+      });
 
       expect(lineIndexOf(draft, "Draft note")).toBe(lineIndexOf(draft, "hiddenLine01") + 1);
     } finally {
@@ -294,29 +346,48 @@ describe("PTY current line", () => {
     try {
       await session.waitForText(/View\s+Navigate\s+Agent\s+Help/, { timeout: 15_000 });
       await session.waitIdle({ timeout: 300 });
-      await session.press("c");
-      const beforeExpand = await session.waitForText(/Draft note/, { timeout: 5_000 });
+      const beforeExpand = await harness.pressAndWaitForText(session, "c", /Draft note/, {
+        timeout: 5_000,
+      });
       const startRow = /Draft note[^R]*R(\d+)/.exec(beforeExpand)?.[1];
       expect(startRow).toBeDefined();
-      await session.press("escape");
-      await harness.waitForSnapshot(session, (text) => !text.includes("Draft note"), 5_000);
+      await harness.pressAndWaitForSnapshot(
+        session,
+        "escape",
+        (text) => !text.includes("Draft note"),
+        5_000,
+      );
 
-      await session.press("z");
-      await harness.waitForSnapshot(session, (text) => text.includes("hiddenLine01"), 5_000);
+      await harness.pressAndWaitForSnapshot(
+        session,
+        "z",
+        (text) => text.includes("hiddenLine01"),
+        5_000,
+      );
       await session.waitIdle({ timeout: 500 });
-      await session.press("c");
-      const expanded = await session.waitForText(/Draft note/, { timeout: 5_000 });
+      const expanded = await harness.pressAndWaitForText(session, "c", /Draft note/, {
+        timeout: 5_000,
+      });
 
       expect(expanded).toContain("R1 ");
       expect(lineIndexOf(expanded, "Draft note")).toBe(lineIndexOf(expanded, "hiddenLine01") + 1);
-      await session.press("escape");
-      await harness.waitForSnapshot(session, (text) => !text.includes("Draft note"), 5_000);
+      await harness.pressAndWaitForSnapshot(
+        session,
+        "escape",
+        (text) => !text.includes("Draft note"),
+        5_000,
+      );
 
-      await session.press("z");
-      await harness.waitForSnapshot(session, (text) => !text.includes("hiddenLine01"), 5_000);
+      await harness.pressAndWaitForSnapshot(
+        session,
+        "z",
+        (text) => !text.includes("hiddenLine01"),
+        5_000,
+      );
       await session.waitIdle({ timeout: 500 });
-      await session.press("c");
-      const collapsed = await session.waitForText(/Draft note/, { timeout: 5_000 });
+      const collapsed = await harness.pressAndWaitForText(session, "c", /Draft note/, {
+        timeout: 5_000,
+      });
 
       expect(collapsed).toContain(`R${startRow} `);
     } finally {
@@ -365,8 +436,9 @@ describe("PTY current line", () => {
       const anchor = paged[12]?.trim() ?? "";
       expect(anchor.length).toBeGreaterThan(0);
 
-      await session.press("c");
-      const draft = await session.waitForText(/Draft note/, { timeout: 5_000 });
+      const draft = await harness.pressAndWaitForText(session, "c", /Draft note/, {
+        timeout: 5_000,
+      });
 
       expect(draft).toContain(anchor);
     } finally {
@@ -387,21 +459,24 @@ describe("PTY current line", () => {
       await session.waitForText(/View\s+Navigate\s+Agent\s+Help/, { timeout: 15_000 });
       await session.waitIdle({ timeout: 300 });
 
-      await session.press("c");
-      const draftAtTop = await session.waitForText(/Draft note/, { timeout: 5_000 });
+      const draftAtTop = await harness.pressAndWaitForText(session, "c", /Draft note/, {
+        timeout: 5_000,
+      });
       const draftRowAtTop = lineIndexOf(draftAtTop, "Draft note");
       expect(draftRowAtTop).toBeGreaterThan(0);
 
-      await session.press("escape");
-      await harness.waitForSnapshot(session, (text) => !text.includes("Draft note"), 5_000);
+      await harness.pressAndWaitForSnapshot(
+        session,
+        "escape",
+        (text) => !text.includes("Draft note"),
+        5_000,
+      );
 
-      for (let step = 0; step < 4; step += 1) {
-        await session.press("j");
-        await session.waitIdle({ timeout: 200 });
-      }
+      await pressKeyRepeat(session, "j", 4);
 
-      await session.press("c");
-      const draftAtCursor = await session.waitForText(/Draft note/, { timeout: 5_000 });
+      const draftAtCursor = await harness.pressAndWaitForText(session, "c", /Draft note/, {
+        timeout: 5_000,
+      });
 
       expect(lineIndexOf(draftAtCursor, "Draft note")).toBeGreaterThan(draftRowAtTop);
     } finally {

@@ -8,8 +8,8 @@ exists so you know which module owns what.
 
 ## Tiers and loading
 
-Extensions come in two tiers running through the same per-extension API
-object and registry collection (`packages/hunk/src/extensions/runExtension.ts`):
+Extensions come in user-installed and bundled tiers, all running through the same per-extension
+API object and registry collection (`packages/hunk/src/extensions/runExtension.ts`):
 
 - **User extensions** load during app bootstrap after initial config resolution and before final
   session bootstrap (`packages/hunk/src/app/extensionBootstrap.ts`,
@@ -21,15 +21,23 @@ object and registry collection (`packages/hunk/src/extensions/runExtension.ts`):
   `packages/hunk/src/extensions/default/vcs/index.ts`; the app composition root
   (`app/vcsCatalog.ts`) loads them synchronously before config resolution, so backends exist
   without making core import the extension host. `default/ui/index.ts` is deliberately not part of
-  that list: the UI pane planner loads its bundled files and delegated review-info registrations
-  through `runExtensionFactory`.
+  that list: the UI loads its bundled files pane, delegated review-info panes, and content search
+  registrations through `runExtensionFactory`, once per process. The private `packages/hunk-gh`
+  workspace registers `hunk gh` through `default/core/index.ts` into each session-owned extension
+  registry, so a delegated temporary patch follows the same shutdown lifetime as that session.
 
 Git, built-in file navigation, and change-request or history-commit identity use the public
 `registerVcsAdapter` and `registerPane` paths. The external [Hunk Lens](https://github.com/modem-dev/hunk-lens)
 extension exercises current-line pane paint through that same public contract.
 
 Bundled extensions are implicitly trusted and stay loaded under
-`--no-extensions`, which governs user extensions only.
+`--no-extensions`, which governs user discovery and loading only. Independently selectable
+capabilities also carry a host-owned **selection id**, separate from their registration namespace;
+for example, `hunk.gh` selects the bundled GitHub factory while its public command registrations
+remain under `hunk`. `packages/hunk/src/core/run/extensionSelection.ts` resolves user and repo deny-lists
+plus ordered CLI overrides without I/O. `startup.ts` applies that decision to `hunk.gh` and user
+candidates before factory execution, module import, or trust prompting, and includes the selection
+snapshot in staged-load compatibility.
 
 An extension id is a file stem the user chose, and it is the namespace that id
 owns for commands (`<extensionId>.<commandId>`), panes
@@ -42,6 +50,42 @@ unsplittable), and the later of two sources claiming one id; each refusal is a
 load issue and costs only that extension. The rules themselves are stated in
 `packages/hunk/src/extensions/extensionIds.ts`.
 
+## Managed Git and npm installation
+
+`extensions/manage/source.ts` parses Git/local-checkout and npm specifications;
+`install.ts` owns staging, validation, promotion/rollback, and management operations
+for both backends. Existing untagged install records normalize as Git records.
+Git acquisition retains clone/ref and dependency behavior. `manage/npm.ts` invokes
+npm with scripts and automatic peer installation disabled, leaving registry,
+authentication, integrity checks, and dependency resolution to the package manager.
+npm locates the launch project's configuration with `npm prefix`; a temporary staging
+`.npmrc` preserves project/user/environment precedence while install runs from the
+launch directory to preserve relative configuration paths. The copy is removed before
+validation or promotion, including failed acquisitions, so project credentials are not
+persisted in the workspace.
+Local-mode and safety policy apply through both CLI flags and case/separator-normalized npm
+environment configuration so child npm processes cannot inherit conflicting settings.
+A randomized, non-existent script-shell path fails closed if npm attempts a hook
+anyway; this covers Git `prepare` behavior in npm versions that ignore suppression.
+
+Each npm install owns an isolated workspace containing its package and dependencies
+in their normal `node_modules` layout. A generated workspace-root `hunk` manifest
+points to the installed package's validated entries and retains its API requirement,
+so `discovery.ts` needs no registry-specific semantics and never scans dependencies.
+The runtime source hook uses Bun's compiler to preserve CommonJS exports as ESM when
+helpers require host modules; compiler-generated host require calls become static
+virtual imports so their lazy factories settle before helper evaluation. Dependencies
+stay external rather than being bundled into a parallel module graph.
+`manage/workspace.ts` recognizes package entries owned by npm records, including
+aliased paths; `hostRuntimeModules.ts` scopes host-import rewriting to their complete
+isolated module workspace so hoisted helpers can consume host peers. Neighboring
+installs, unrecorded folders, and Git source scopes are not widened.
+The single-entry ID derives from a bounded package-name prefix and full SHA-256;
+multiple entries follow existing manifest identity/order rules. CLI package aliases
+resolve to that storage name; updates persist the requested selector and resolved
+version separately. npm acquisition and validation failures clean staging and leave
+the previous directory and record untouched.
+
 ## One registry model, separate composition paths
 
 Registrations (session behavior, themes, file languages, VCS adapters,
@@ -49,8 +93,10 @@ changeset transforms, panes, interactive commands, top-level CLI commands,
 lifecycle/UI events, and inter-extension bus listeners) collect into an
 `ExtensionRegistry` (`packages/hunk/src/extensions/types.ts`). Bundled VCS, bundled UI, and user
 extensions use separate registry instances and lifecycle owners. `app/vcsCatalog.ts` composes
-bundled VCS registrations directly; `ui/lib/extensionPanes.ts` reads bundled UI pane registrations;
-and `extensions/apply.ts` applies user registrations during session bootstrap and reload.
+bundled VCS registrations directly; `ui/lib/extensionPanes.ts` reads bundled UI pane registrations
+and `ui/lib/sessionRegistrations.ts` composes bundled UI commands and line highlighters ahead of
+the user registry's (so the bundled `/` search stays active under `--no-extensions`); and
+`extensions/apply.ts` applies user registrations during session bootstrap and reload.
 File-language registrations stay as
 declarative extension, filename, or glob selectors until `fileLanguageLookup.ts` resolves them;
 Hunk then pins that answer into Pierre's metadata so rendering cannot re-derive a conflicting
@@ -64,12 +110,13 @@ retiring registries by identity; it synchronously closes authority at adoption/s
 all known bounded retirements. Surfaces borrow that session and cannot retire it independently.
 A user or bundled-VCS factory that throws is rolled back to its pre-run registration counts
 (`runExtension.ts`); failures cost a warning, not the session. Bundled UI registration instead
-requires every expected pane and throws if Hunk's own invariant fails.
+requires every pane its factories declare and throws if Hunk's own invariant fails.
 
 Generic CLI commands deliberately remain separate from the interactive named-command
 table. `parseCli` resolves known built-ins first, preserving static help/version and
 headless fast paths. Only an unknown top-level token produces an `extension-cli`
-envelope and enters extension-only config/discovery. The winning registration owns
+envelope and enters the extension bootstrap. Enabled bundled core registrations load first even
+when user extensions are disabled; optional user discovery follows, and the first registration owns
 the raw subtree and runs through leased process I/O. An exit result retires the
 registry before returning an exit plan; a one-time built-in delegation reparses
 through the ordinary planner. Delegated reviews reconcile the already loaded
@@ -95,6 +142,20 @@ render inside the app's React tree with working hooks. The module header
 documents why the obvious alternatives don't work (process-wide specifier
 claims break the host's lazy imports; the loaders resolve lazily so headless
 commands never pay OpenTUI's native-library extraction).
+
+The rewrite reads transpiled syntax and lexical scopes, so documentation strings,
+member calls, and locally bound `require` functions stay unchanged. Other bare
+package references resolve through `installedPackageResolution.ts` against the
+importer's real filesystem directory, including nested/subpath exports and
+Bun/Node import-versus-require conditions. Reachable ESM dependency files receive
+file-scoped hooks too, including relative helpers outside the entry directory;
+unrelated files and native CommonJS packages are not claimed by those hooks.
+Resolution failures do not fall back to the compiled loader, which can bypass
+blocked exports. Failed dynamic imports and runtime `require` calls target lazy
+failure modules so the extension can catch the error when the operation executes.
+The asynchronous source hook still cannot serve synchronous `require()` of
+JavaScript/CommonJS source; this change does not introduce a second evaluator
+to work around it.
 
 ## Four-edge pane system
 
@@ -271,6 +332,19 @@ Hunk-owned bundled UI. `packages/hunk/src/ui/lib/modalGeometry.ts` clamps the fr
 extension text is wrapped or windowed, so measurement and rendering use the
 same terminal width; body/options yield rows to a pinned mouse-clickable action
 footer on short terminals.
+
+The bottom status row is the same kind of host-owned surface with the same
+lifetimes. `packages/hunk/src/ui/statusLine/` holds a renderer-free store
+(`store.ts`: insertion-ordered items plus a FIFO prompt queue that settles like
+the dialog queue), a deterministic width/priority layout (`layout.ts`), one
+`StatusLine` component that owns the focused input and the badge's
+click-to-exit, and `extensionControls.ts`, which mints the per-extension
+`statusLine` and `prompts` objects, namespaces item ids under the extension, and
+validates extension-authored items and options. `App` and `LogApp` each mount
+one store: the file filter and `hunk log` search are its first consumers, so the
+host and extensions share one prompt path and one overflow policy. A prompt is a
+host focused input and routes with the filter, ahead of file-view and session
+modes; items survive content reloads and clear with the registry.
 
 Lifecycle and bus handlers receive that same attributed dialog queue plus the
 same guarded live navigation commands use. They can also request a current-input soft reload;

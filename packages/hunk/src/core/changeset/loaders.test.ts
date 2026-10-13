@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
+  appendFileSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -10,7 +11,7 @@ import {
 } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
-import { replaceExtensionFileLanguages } from "./fileLanguage";
+import { replaceExtensionFileLanguages } from "../documents/fileLanguage";
 import { SourceTextTooLargeError } from "./fileSource";
 import { getBundledVcsCatalog } from "../../app/vcsCatalog";
 import { createGitVcsAdapter } from "@hunk/git";
@@ -118,13 +119,15 @@ function sl(cwd: string, ...cmd: string[]) {
   return Buffer.from(proc.stdout).toString("utf8");
 }
 
+/** Create a Git fixture without paying for separate config subprocesses. */
 function createTempRepo(prefix: string) {
   const dir = createTempDir(prefix);
 
   git(dir, "init", "--initial-branch", "master");
-  git(dir, "config", "user.name", "Test User");
-  git(dir, "config", "user.email", "test@example.com");
-  git(dir, "config", "commit.gpgsign", "false");
+  appendFileSync(
+    join(dir, ".git", "config"),
+    "\n[user]\n\tname = Test User\n\temail = test@example.com\n[commit]\n\tgpgsign = false\n",
+  );
 
   return dir;
 }
@@ -1507,21 +1510,19 @@ describe("loadAppBootstrap", () => {
     });
   });
 
-  test("treats malformed inline patch text as an empty review instead of throwing", async () => {
-    const bootstrap = await loadAppBootstrap({
-      kind: "patch",
-      text: [
-        "\u001b]0;title\u0007not really a patch",
-        "--- separator only",
-        "@@ section heading",
-        "still plain text",
-      ].join("\n"),
-      options: { mode: "auto" },
-    });
-
-    expect(bootstrap.changeset.files).toHaveLength(0);
-    expect(bootstrap.changeset.title).toContain("Patch review");
-    expect(bootstrap.changeset.summary).toContain("not really a patch");
+  test("rejects malformed inline patch text instead of treating it as an empty review", async () => {
+    await expect(
+      loadAppBootstrap({
+        kind: "patch",
+        text: [
+          "\u001b]0;title\u0007not really a patch",
+          "--- separator only",
+          "@@ section heading",
+          "still plain text",
+        ].join("\n"),
+        options: { mode: "auto" },
+      }),
+    ).rejects.toThrow("No recognizable file changes in patch input");
   });
 
   test("loads colorized git patch files like the real pager stdin stream", async () => {

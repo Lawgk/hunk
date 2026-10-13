@@ -10,12 +10,13 @@ import type { MenuId } from "../components/chrome/menu";
 import {
   dispatchAppCommand,
   executeAppCommand,
+  findAppCommandById,
   type AppCommand,
   verticalCommandDirection,
 } from "../lib/appCommands";
 import type { ExtensionDialogRequest } from "../lib/extensionDialogs";
 import { toExtensionKeyEvent } from "../lib/extensionKeyEvent";
-import { isEscapeKey, isSaveDraftNoteKey } from "../lib/keyboard";
+import { isEscapeKey, noteComposerSaveOwner, printableKeyText } from "../lib/keyboard";
 import { routeKeyOwnership, type KeyOwner } from "../lib/keyRouting";
 import { handleViewPreferenceQuitPromptKey } from "../lib/viewPreferenceQuitKeys";
 
@@ -57,11 +58,19 @@ export interface UseAppKeyboardShortcutsOptions {
   sendFileViewModeKey: (key: ExtensionKeyEvent) => ExtensionFileViewModeKeyResult;
   /** Whether a session-scoped extension keyboard mode currently owns review keys. */
   isKeyboardModeActive: () => boolean;
+  /** Whether a draft note editor is still mounting and has not taken focus yet. */
+  isDraftFocusPending: () => boolean;
+  /** Hold printable input for that draft instead of dispatching it as commands. */
+  queueDraftInput: (text: string) => void;
+  /** Deliver held input once the mounted draft editor owns the keyboard. */
+  flushDraftInput: () => void;
   /** Leave the active session keyboard mode. */
   exitKeyboardMode: () => void;
   /** Offer one key to the active session keyboard mode. */
   sendKeyboardModeKey: (key: ExtensionKeyEvent) => ExtensionKeyboardModeKeyResult;
   focusArea: FocusArea;
+  /** Whether a status-line prompt (the host filter or an extension's) currently owns typing. */
+  promptActive: boolean;
   moveMenuItem: (delta: number) => void;
   moveThemeSelector: (delta: number) => void;
   openMenu: (menuId: MenuId) => void;
@@ -70,7 +79,6 @@ export interface UseAppKeyboardShortcutsOptions {
   discardViewPreferencesAndQuit: () => void;
   neverAskToSaveViewPreferencesAndQuit: () => void;
   closeSaveConfigPrompt: () => void;
-  saveDraftNote: (editorBody?: string) => void;
   showAgentSkill: boolean;
   showHelp: boolean;
   switchMenu: (delta: number) => void;
@@ -120,9 +128,13 @@ export function useAppKeyboardShortcuts({
   exitFileViewMode,
   sendFileViewModeKey,
   isKeyboardModeActive,
+  isDraftFocusPending,
+  queueDraftInput,
+  flushDraftInput,
   exitKeyboardMode,
   sendKeyboardModeKey,
   focusArea,
+  promptActive,
   moveMenuItem,
   moveThemeSelector,
   openMenu,
@@ -131,7 +143,6 @@ export function useAppKeyboardShortcuts({
   discardViewPreferencesAndQuit,
   neverAskToSaveViewPreferencesAndQuit,
   closeSaveConfigPrompt,
-  saveDraftNote,
   showAgentSkill,
   showHelp,
   switchMenu,
@@ -143,6 +154,7 @@ export function useAppKeyboardShortcuts({
   const commandsRef = useRef(commands);
   const clearVisualSelectionRef = useRef(clearVisualSelection);
   const focusAreaRef = useRef(focusArea);
+  const promptActiveRef = useRef(promptActive);
   const showAgentSkillRef = useRef(showAgentSkill);
   const showHelpRef = useRef(showHelp);
   const saveConfigPromptOpenRef = useRef(saveConfigPromptOpen);
@@ -155,6 +167,9 @@ export function useAppKeyboardShortcuts({
   const exitFileViewModeRef = useRef(exitFileViewMode);
   const sendFileViewModeKeyRef = useRef(sendFileViewModeKey);
   const isKeyboardModeActiveRef = useRef(isKeyboardModeActive);
+  const isDraftFocusPendingRef = useRef(isDraftFocusPending);
+  const queueDraftInputRef = useRef(queueDraftInput);
+  const flushDraftInputRef = useRef(flushDraftInput);
   const exitKeyboardModeRef = useRef(exitKeyboardMode);
   const sendKeyboardModeKeyRef = useRef(sendKeyboardModeKey);
   // These three close over live dialog state (the highlighted option, the typed
@@ -167,6 +182,7 @@ export function useAppKeyboardShortcuts({
   commandsRef.current = commands;
   clearVisualSelectionRef.current = clearVisualSelection;
   focusAreaRef.current = focusArea;
+  promptActiveRef.current = promptActive;
   showAgentSkillRef.current = showAgentSkill;
   showHelpRef.current = showHelp;
   saveConfigPromptOpenRef.current = saveConfigPromptOpen;
@@ -177,6 +193,9 @@ export function useAppKeyboardShortcuts({
   exitFileViewModeRef.current = exitFileViewMode;
   sendFileViewModeKeyRef.current = sendFileViewModeKey;
   isKeyboardModeActiveRef.current = isKeyboardModeActive;
+  isDraftFocusPendingRef.current = isDraftFocusPending;
+  queueDraftInputRef.current = queueDraftInput;
+  flushDraftInputRef.current = flushDraftInput;
   exitKeyboardModeRef.current = exitKeyboardMode;
   sendKeyboardModeKeyRef.current = sendKeyboardModeKey;
   acceptExtensionDialogRef.current = acceptExtensionDialog;
@@ -455,13 +474,16 @@ export function useAppKeyboardShortcuts({
   };
 
   /**
-   * Route keys around the focused text inputs (the file filter and the inline
-   * note draft).
+   * Route keys around the focused text inputs (the status-line prompt and the
+   * inline note draft).
    *
    * Both inputs receive their characters through OpenTUI's renderable path,
    * which consuming would cut off — so plain typing is `"focused"`, and only
-   * the inputs' explicit escape hatches (Tab out of the filter, Escape/Ctrl-S
-   * on a draft) are acted on here and owned as `"mine"`.
+   * the inputs' explicit escape hatches (Tab out of the filter, Escape on a
+   * draft, and the resolved save-note chord) are acted on here and owned as
+   * `"mine"`.
+   * The prompt's own Escape handling lives on the input, which clears first
+   * and closes second.
    */
   const handleFocusedInputShortcut = (key: KeyEvent): KeyOwner => {
     if (focusAreaRef.current === "filter") {
@@ -476,16 +498,44 @@ export function useAppKeyboardShortcuts({
         return "mine";
       }
 
-      // Everything else is the filter's text (its own Escape handling lives on
-      // the input, which clears first and closes second).
+      // Everything else is the filter's text.
       return "focused";
     }
 
+    if (promptActiveRef.current) {
+      // An extension prompt has no host escape hatch: every key is its text.
+      return "focused";
+    }
+
+    // React may commit note focus before the windowed editor mounts. Until a
+    // real editor is focused, this transition owns keys in either focus state.
+    if (isDraftFocusPendingRef.current() && !renderer.currentFocusedEditor) {
+      if (isEscapeKey(key)) {
+        cancelDraftNote();
+        return "mine";
+      }
+      const save = findAppCommandById(commandsRef.current, "hunk.review.saveNote");
+      const saveOwner = noteComposerSaveOwner(save?.keys ?? [], key, () =>
+        executeAppCommand(commandsRef.current, "hunk.review.saveNote"),
+      );
+      if (saveOwner) return saveOwner;
+
+      const text = printableKeyText(key);
+      if (text !== undefined) queueDraftInputRef.current(text);
+      return "mine";
+    }
+
     if (focusAreaRef.current !== "note") {
-      // Extension panes can mount the same OpenTUI editors Hunk uses. The
-      // renderer is the live focus authority for those inputs, which do not
-      // participate in App's host-only focus-area state.
+      // Extension panes also own editors outside the host focus-area state.
       return renderer.currentFocusedEditor ? "focused" : "notMine";
+    }
+
+    // The draft editor owns the keyboard now, so input held for it during the
+    // transition is delivered first and this key lands after it. One input
+    // chunk's keys are routed before any render answers, which is why the
+    // delivery also happens here rather than only after a commit.
+    if (isDraftFocusPendingRef.current()) {
+      flushDraftInputRef.current();
     }
 
     if (isEscapeKey(key)) {
@@ -493,9 +543,12 @@ export function useAppKeyboardShortcuts({
       return "mine";
     }
 
-    if (isSaveDraftNoteKey(key)) {
-      saveDraftNote(renderer.currentFocusedEditor?.plainText);
-      return "mine";
+    const save = findAppCommandById(commandsRef.current, "hunk.review.saveNote");
+    const saveOwner = noteComposerSaveOwner(save?.keys ?? [], key, () =>
+      executeAppCommand(commandsRef.current, "hunk.review.saveNote"),
+    );
+    if (saveOwner) {
+      return saveOwner;
     }
 
     // Everything else is the note draft's text, including keys that double as

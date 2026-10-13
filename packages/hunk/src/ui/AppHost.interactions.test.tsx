@@ -6,6 +6,7 @@ import { testRender } from "@opentui/react/test-utils";
 import { act } from "react";
 import { SESSION_BROKER_REGISTRATION_VERSION } from "@hunk/session-broker-core";
 import type { HunkSessionBrokerClient } from "../session/broker/brokerClient";
+import { HUNK_DAEMON_CLIENT_NEWER_MESSAGE } from "../session/client/daemonSkew";
 import type {
   HunkSessionRegistration,
   HunkSessionServerMessage,
@@ -81,6 +82,7 @@ function createMockHostClient({
   type Bridge = Parameters<HunkSessionBrokerClient["setBridge"]>[0];
 
   let bridge: Bridge = null;
+  let noticeListener: ((notice: string | null) => void) | null = null;
   let latestSnapshot: HunkSessionSnapshot["state"] | null = null;
   let registration: HunkSessionRegistration = {
     registrationVersion: SESSION_BROKER_REGISTRATION_VERSION,
@@ -102,6 +104,13 @@ function createMockHostClient({
       replaceSession: (nextRegistration: HunkSessionRegistration) => {
         registration = nextRegistration;
       },
+      subscribeConnectionNotice: (listener: (notice: string | null) => void) => {
+        noticeListener = listener;
+        listener(null);
+        return () => {
+          if (noticeListener === listener) noticeListener = null;
+        };
+      },
       setBridge: (nextBridge: Bridge) => {
         bridge = nextBridge;
       },
@@ -109,6 +118,11 @@ function createMockHostClient({
         latestSnapshot = snapshot.state;
       },
     } as unknown as HunkSessionBrokerClient,
+    /** Emit one daemon link notice the way the broker client does after a refused hello. */
+    publishConnectionNotice: (notice: string | null) => {
+      if (!noticeListener) throw new Error("Expected App to subscribe to the daemon link notice.");
+      noticeListener(notice);
+    },
     dispatchCommand: async (message: HunkSessionServerMessage) => {
       if (!bridge) {
         throw new Error("Expected App to register a bridge before running the test command.");
@@ -3025,6 +3039,64 @@ describe("App interactions", () => {
     }
   });
 
+  test("stepping the cursor retires a stale hover before the next draft opens", async () => {
+    const setup = await testRender(
+      <AppHost bootstrap={createLineScrollBootstrap(false, "unified")} />,
+      {
+        width: 120,
+        height: 26,
+      },
+    );
+
+    try {
+      await flush(setup);
+      await act(async () => {
+        await Bun.sleep(60);
+        await setup.renderOnce();
+      });
+
+      // Hover the row showing line02 so its add-note affordance arms.
+      const frame = setup.captureCharFrame();
+      const hover = frame
+        .split("\n")
+        .map((line, index) => [index, line] as const)
+        .find(([, line]) => line.includes("export const line02 = 2;"));
+      expect(hover).toBeDefined();
+      await act(async () => {
+        await setup.mockMouse.moveTo(10, hover![0]);
+        await setup.renderOnce();
+      });
+      await waitForFrame(setup, (next) => next.includes("[+]"));
+
+      // Step the cursor down several lines; the pointer stays where it was.
+      await act(async () => {
+        await setup.mockInput.pressKeys(["\x1b[B", "\x1b[B", "\x1b[B"]);
+      });
+      await flush(setup);
+      await act(async () => {
+        await Bun.sleep(60);
+        await setup.renderOnce();
+      });
+
+      // The draft must anchor at the stepped cursor, not the stale hover row.
+      await act(async () => {
+        await setup.mockInput.pressKey("c");
+      });
+      await flush(setup);
+      await act(async () => {
+        await Bun.sleep(60);
+        await setup.renderOnce();
+      });
+
+      const withDraft = setup.captureCharFrame();
+      expect(withDraft).toMatch(/Draft note.*L4/);
+    } finally {
+      await act(async () => {
+        setup.renderer.destroy();
+      });
+    }
+  });
+
   test("draft note focus suppresses app shortcuts while accepting typed shortcut keys", async () => {
     const setup = await testRender(<AppHost bootstrap={createBootstrap()} />, {
       width: 240,
@@ -4189,4 +4261,50 @@ describe("App interactions", () => {
       });
     }
   });
+
+  // Keep the daemon warning independent of timed notices, including when the status row overflows.
+  test.each([80, 120, 220])(
+    "keeps the daemon link notice on the %i-column status line until reconnect",
+    async (width) => {
+      const { hostClient, publishConnectionNotice } = createMockHostClient();
+      const bootstrap = createBootstrap();
+      bootstrap.keybindings = { "hunk.app.quti": "ctrl+x" };
+      const setup = await testRender(<AppHost bootstrap={bootstrap} hostClient={hostClient} />, {
+        width,
+        height: 20,
+      });
+      const notice = HUNK_DAEMON_CLIENT_NEWER_MESSAGE;
+
+      try {
+        await flush(setup);
+        expect(setup.captureCharFrame()).not.toContain(notice);
+        expect(setup.captureCharFrame()).toContain(
+          'Keybinding for unknown command "hunk.app.quti" ignored',
+        );
+
+        await act(async () => publishConnectionNotice(notice));
+        await flush(setup);
+        const statusRow = setup.captureCharFrame().trimEnd().split("\n").at(-1) ?? "";
+        expect(statusRow).toContain(notice);
+        if (width === 220) expect(statusRow).toContain("Keybinding for unknown command");
+        else expect(statusRow).not.toContain("Keybinding for unknown command");
+
+        // Expiring the ordinary notice must not clear the daemon's persistent condition.
+        await act(async () => {
+          await Bun.sleep(4_100);
+        });
+        await flush(setup);
+        expect(setup.captureCharFrame()).not.toContain("Keybinding for unknown command");
+        expect(setup.captureCharFrame().trimEnd().split("\n").at(-1)).toContain(notice);
+
+        await act(async () => publishConnectionNotice(null));
+        await flush(setup);
+        expect(setup.captureCharFrame()).not.toContain(notice);
+      } finally {
+        await act(async () => {
+          setup.renderer.destroy();
+        });
+      }
+    },
+  );
 });

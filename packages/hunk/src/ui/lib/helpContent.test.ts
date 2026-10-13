@@ -1,16 +1,30 @@
 import { describe, expect, test } from "bun:test";
+import { getBundledUIRegistry } from "../../extensions/default/ui";
 import {
   builtinCommandKeyDefaults,
   builtinCommandMatchProbes,
   type AppCommand,
 } from "./appCommands";
+import { buildExtensionAppCommands, extensionCommandKeyDefaults } from "./extensionCommands";
 import { buildHelpSections, type HelpSection } from "./helpContent";
 import { resolveCommandKeys } from "./keymap";
+import { buildSessionCommands } from "./sessionRegistrations";
 
-/** The help rows for a session with the given `[keybindings]` entries. */
+/** The help rows for a session with the given `[keybindings]` entries and bundled commands. */
 function helpSections(userBindings?: Record<string, string | false>): HelpSection[] {
-  const { keys } = resolveCommandKeys({ defaults: builtinCommandKeyDefaults(), userBindings });
-  return buildHelpSections(builtinCommandMatchProbes(keys));
+  const bundled = buildSessionCommands(undefined, getBundledUIRegistry());
+  const { keys } = resolveCommandKeys({
+    defaults: [...builtinCommandKeyDefaults(), ...extensionCommandKeyDefaults(bundled)],
+    userBindings,
+  });
+  const builtins = builtinCommandMatchProbes(keys);
+  const { commands } = buildExtensionAppCommands({
+    registered: bundled,
+    builtins,
+    resolvedKeys: keys,
+    runCommand: () => {},
+  });
+  return buildHelpSections([...builtins, ...commands]);
 }
 
 /** The key column of the row documenting one description. */
@@ -34,6 +48,24 @@ describe("buildHelpSections", () => {
     expect(keysFor(sections, "move through lines and notes")).toBe("Up / Down");
     expect(keysFor(sections, "unified / split / auto")).toBe("1 / 2 / 0");
     expect(keysFor(sections, "lines / wrap / metadata / menu")).toBe("l / w / m / M");
+    expect(keysFor(sections, "annotated hunk / exact note")).toBe("{ / }");
+  });
+
+  test("documents the bundled search keys beside the built-in navigation rows", () => {
+    const sections = helpSections();
+
+    expect(keysFor(sections, "search diff content")).toBe("/");
+    expect(keysFor(sections, "next / previous search match")).toBe("n / N");
+    // The filter ships unbound, so its row disappears rather than advertising nothing.
+    expect(keysFor(sections, "focus file filter")).toBeUndefined();
+  });
+
+  test("handing / back to the filter takes it from search and shows both truthfully", () => {
+    const sections = helpSections({ "hunk.review.focusFilter": "/" });
+
+    expect(keysFor(sections, "focus file filter")).toBe("/");
+    expect(keysFor(sections, "search diff content")).toBeUndefined();
+    expect(keysFor(sections, "next / previous search match")).toBe("n / N");
   });
 
   test("a row about one command lists every chord it answers to", () => {
@@ -42,6 +74,7 @@ describe("buildHelpSections", () => {
     expect(keysFor(sections, "page down")).toBe("PageDown / Space / f");
     expect(keysFor(sections, "page up")).toBe("PageUp / b / Shift+Space");
     expect(keysFor(sections, "jump to start")).toBe("g / Home");
+    expect(keysFor(sections, "save draft note")).toBe("Ctrl+S");
   });
 
   test("keeps the rows that are not commands at all", () => {
@@ -59,6 +92,9 @@ describe("buildHelpSections", () => {
 
     expect(keysFor(sections, "previous / next hunk")).toBe("[ / Ctrl+N");
     expect(keysFor(sections, "quit")).toBe("Ctrl+X");
+    expect(keysFor(helpSections({ "hunk.review.saveNote": "ctrl+enter" }), "save draft note")).toBe(
+      "Ctrl+Enter",
+    );
   });
 
   test("an unbound command drops out of its row, and an empty row drops out entirely", () => {
@@ -71,6 +107,9 @@ describe("buildHelpSections", () => {
     expect(keysFor(sections, "previous / next hunk")).toBe("]");
     // Nothing left to document, so the row is gone rather than blank.
     expect(keysFor(sections, "create review note")).toBeUndefined();
+    expect(
+      keysFor(helpSections({ "hunk.review.saveNote": false }), "save draft note"),
+    ).toBeUndefined();
   });
 
   test("a disabled command is documented only while it can run", () => {

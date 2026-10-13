@@ -4,7 +4,6 @@
  * `DiffSection` owns the file header and picks a body; this is the diff-row body it picks
  * for a normal review, beside `FileView` for the alternate file views.
  */
-import { useRenderer } from "@opentui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DEFAULT_HUNK_GAP } from "../../core/run/reviewGap";
 import { DEFAULT_TAB_WIDTH } from "../../core/run/tabWidth";
@@ -75,6 +74,7 @@ export function DiffSectionBody({
   sourceStatus,
   tabWidth = DEFAULT_TAB_WIDTH,
   hunkGap = DEFAULT_HUNK_GAP,
+  visibleHunkIndexes,
   wrapLines = false,
   theme,
   visibleAgentNotes = EMPTY_VISIBLE_AGENT_NOTES,
@@ -84,7 +84,6 @@ export function DiffSectionBody({
   selectedHunkIndex,
   sectionGeometry,
   shouldLoadHighlight = true,
-  offloadLargeDiff = false,
   scrollable = true,
   visibleBodyBounds,
 }: {
@@ -108,6 +107,7 @@ export function DiffSectionBody({
   sourceStatus?: FileSourceStatus | undefined;
   tabWidth?: number;
   hunkGap?: number;
+  visibleHunkIndexes?: ReadonlySet<number>;
   wrapLines?: boolean;
   theme: AppTheme;
   visibleAgentNotes?: VisibleAgentNote[];
@@ -117,11 +117,9 @@ export function DiffSectionBody({
   selectedHunkIndex: number;
   sectionGeometry?: DiffSectionGeometry;
   shouldLoadHighlight?: boolean;
-  offloadLargeDiff?: boolean;
   scrollable?: boolean;
   visibleBodyBounds?: VisibleBodyBounds;
 }) {
-  const renderer = useRenderer();
   const [hoveredRowKey, setHoveredRowKey] = useState<string | null>(null);
   const hoverIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousHoverClearSignalRef = useRef(hoverClearSignal);
@@ -180,19 +178,10 @@ export function DiffSectionBody({
     clearHoveredRow();
   }, [clearHoveredRow, hoverClearSignal]);
 
-  useEffect(() => {
-    /** Hide hover-only affordances when terminal focus leaves Hunk. */
-    renderer.on("blur", clearHoveredRow);
-    return () => {
-      renderer.off("blur", clearHoveredRow);
-    };
-  }, [clearHoveredRow, renderer]);
-
   useEffect(() => clearHoverIdleTimeout, [clearHoverIdleTimeout]);
 
   const resolvedHighlighted = useHighlightedDiff({
     file,
-    offloadLargeDiff,
     theme,
     shouldLoadHighlight,
   });
@@ -206,13 +195,8 @@ export function DiffSectionBody({
   });
   const sourceLineSpans = useCallback(
     (line: string | undefined, sourceLineNumber: number) =>
-      spansForHighlightedSourceLine(
-        line,
-        resolvedHighlightedSource?.lines[sourceLineNumber],
-        theme,
-        tabWidth,
-      ),
-    [resolvedHighlightedSource, tabWidth, theme],
+      spansForHighlightedSourceLine(line, resolvedHighlightedSource, tabWidth, sourceLineNumber),
+    [resolvedHighlightedSource, tabWidth],
   );
 
   const sectionRowPlan = useMemo(
@@ -229,6 +213,7 @@ export function DiffSectionBody({
         hunkGap,
         theme,
         visibleAgentNotes,
+        visibleHunkIndexes,
       }),
     [
       expandedGapKeys,
@@ -242,6 +227,7 @@ export function DiffSectionBody({
       hunkGap,
       theme,
       visibleAgentNotes,
+      visibleHunkIndexes,
     ],
   );
   const rowPlanHighlighted =
@@ -348,7 +334,14 @@ export function DiffSectionBody({
 
   if (file.metadata.hunks.length === 0) {
     return (
-      <box style={{ width: "100%", paddingLeft: 1, paddingRight: 1, paddingBottom: 1 }}>
+      <box
+        style={{
+          width: "100%",
+          paddingLeft: 1,
+          paddingRight: 1,
+          paddingBottom: 1,
+        }}
+      >
         <text fg={theme.muted}>{fitText(diffMessage(file), Math.max(1, width - 2))}</text>
       </box>
     );

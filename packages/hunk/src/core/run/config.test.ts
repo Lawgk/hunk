@@ -349,6 +349,34 @@ describe("config resolution", () => {
     }
   });
 
+  test("defaults auto split minimum width to 160, reads configured values, and rejects invalid ones", () => {
+    const home = createTempDir("hunk-config-auto-split-width-home-");
+    const repo = createTempDir("hunk-config-auto-split-width-repo-");
+    createRepo(repo);
+
+    const input = createPatchPagerInput();
+    const env = { HOME: home };
+    expect(
+      resolveConfiguredCliInput(input, { cwd: repo, env }).input.options.autoSplitMinWidth,
+    ).toBe(160);
+
+    mkdirSync(join(home, ".config", "hunk"), { recursive: true });
+    writeFileSync(join(home, ".config", "hunk", "config.toml"), "auto_split_min_width = 180\n");
+    expect(
+      resolveConfiguredCliInput(input, { cwd: repo, env }).input.options.autoSplitMinWidth,
+    ).toBe(180);
+
+    for (const invalid of ["0", "-1", "150.5", '"200"']) {
+      writeFileSync(
+        join(home, ".config", "hunk", "config.toml"),
+        `auto_split_min_width = ${invalid}\n`,
+      );
+      expect(() => resolveConfiguredCliInput(input, { cwd: repo, env })).toThrow(
+        /auto_split_min_width/,
+      );
+    }
+  });
+
   test("defaults file and hunk gaps and rejects invalid configured values", () => {
     const home = createTempDir("hunk-config-gap-home-");
     const repo = createTempDir("hunk-config-gap-repo-");
@@ -379,6 +407,78 @@ describe("config resolution", () => {
       writeFileSync(join(home, ".config", "hunk", "config.toml"), `${key} = ${invalid}\n`);
       expect(() => resolveConfiguredCliInput(input, { cwd: repo, env: { HOME: home } })).toThrow(
         new RegExp(key),
+      );
+    }
+  });
+
+  test("defaults scroll off and rejects invalid configured values", () => {
+    const home = createTempDir("hunk-config-scrolloff-home-");
+    const repo = createTempDir("hunk-config-scrolloff-repo-");
+    createRepo(repo);
+
+    const input = createPatchPagerInput();
+    const resolved = resolveConfiguredCliInput(input, { cwd: repo, env: { HOME: home } }).input
+      .options;
+    expect(resolved.scrollOff).toBe(5);
+
+    mkdirSync(join(home, ".config", "hunk"), { recursive: true });
+    writeFileSync(join(home, ".config", "hunk", "config.toml"), "scroll_off = 5\n");
+    const configured = resolveConfiguredCliInput(input, { cwd: repo, env: { HOME: home } }).input
+      .options;
+    expect(configured.scrollOff).toBe(5);
+
+    const disabled = resolveConfiguredCliInput(
+      { ...input, options: { ...input.options, scrollOff: 0 } },
+      { cwd: repo, env: { HOME: home } },
+    ).input.options;
+    expect(disabled.scrollOff).toBe(0);
+
+    writeFileSync(join(home, ".config", "hunk", "config.toml"), "scroll_off = 0\n");
+    expect(
+      resolveConfiguredCliInput(input, { cwd: repo, env: { HOME: home } }).input.options.scrollOff,
+    ).toBe(0);
+
+    for (const invalid of ["-1", "41", '"5"']) {
+      writeFileSync(join(home, ".config", "hunk", "config.toml"), `scroll_off = ${invalid}\n`);
+      expect(() => resolveConfiguredCliInput(input, { cwd: repo, env: { HOME: home } })).toThrow(
+        /scroll_off/,
+      );
+    }
+  });
+
+  test("resolves wheel scroll lines from user config and CLI but not repository config", () => {
+    const home = createTempDir("hunk-config-wheel-home-");
+    const repo = createTempDir("hunk-config-wheel-repo-");
+    createRepo(repo);
+    const input = createPatchPagerInput();
+    const env = { HOME: home };
+
+    expect(
+      resolveConfiguredCliInput(input, { cwd: repo, env }).input.options.wheelScrollLines,
+    ).toBe("auto");
+
+    mkdirSync(join(home, ".config", "hunk"), { recursive: true });
+    writeFileSync(join(home, ".config", "hunk", "config.toml"), "wheel_scroll_lines = 3\n");
+    mkdirSync(join(repo, ".hunk"), { recursive: true });
+    writeFileSync(join(repo, ".hunk", "config.toml"), "wheel_scroll_lines = 8\n");
+
+    expect(
+      resolveConfiguredCliInput(input, { cwd: repo, env }).input.options.wheelScrollLines,
+    ).toBe(3);
+    expect(
+      resolveConfiguredCliInput(createPatchPagerInput({ wheelScrollLines: 6 }), {
+        cwd: repo,
+        env,
+      }).input.options.wheelScrollLines,
+    ).toBe(6);
+
+    for (const invalid of ["0", "11", '"fast"']) {
+      writeFileSync(
+        join(home, ".config", "hunk", "config.toml"),
+        `wheel_scroll_lines = ${invalid}\n`,
+      );
+      expect(() => resolveConfiguredCliInput(input, { cwd: repo, env })).toThrow(
+        /wheel_scroll_lines/,
       );
     }
   });
@@ -820,7 +920,7 @@ describe("config resolution", () => {
     expect(configured.input.options.transparentBackground).toBe(true);
   });
 
-  test("defaults unspecified themes to github-dark-default, including piped pager-style patch input", () => {
+  test("defaults unspecified themes to terminal, including piped pager-style patch input", () => {
     const home = createTempDir("hunk-config-home-");
     const cwd = createTempDir("hunk-config-cwd-");
 
@@ -831,7 +931,7 @@ describe("config resolution", () => {
 
     expect(resolved.repoConfigPath).toBeUndefined();
     expect(resolved.viewPreferencesConfigPath).toBe(join(home, ".config", "hunk", "config.toml"));
-    expect(resolved.input.options.theme).toBe("github-dark-default");
+    expect(resolved.input.options.theme).toBe("terminal");
   });
 
   test("command-specific config sections also apply to show mode", () => {
@@ -1094,6 +1194,8 @@ describe("config resolution", () => {
         "tab_width = 8",
         "file_gap = 3",
         "hunk_gap = 1",
+        "scroll_off = 5",
+        "wheel_scroll_lines = 4",
         "wrap_lines = true",
         "menu_bar = false",
         "sidebar = true",
@@ -1125,6 +1227,8 @@ describe("config resolution", () => {
     expect(bootstrap.initialTabWidth).toBe(8);
     expect(bootstrap.initialFileGap).toBe(3);
     expect(bootstrap.initialHunkGap).toBe(1);
+    expect(bootstrap.initialScrollOff).toBe(5);
+    expect(bootstrap.initialWheelScrollLines).toBe(4);
     expect(bootstrap.initialWrapLines).toBe(true);
     expect(bootstrap.initialShowMenuBar).toBe(false);
     expect(bootstrap.initialSidebar).toBe(true);
@@ -1184,7 +1288,7 @@ describe("config resolution", () => {
     ]);
   });
 
-  test("loadAppBootstrap exposes github-dark-default when no theme is configured", async () => {
+  test("loadAppBootstrap exposes terminal when no theme is configured", async () => {
     const home = createTempDir("hunk-config-home-");
     const repo = createTempDir("hunk-config-repo-");
     createRepo(repo);
@@ -1205,7 +1309,7 @@ describe("config resolution", () => {
     );
     const bootstrap = await loadAppBootstrap(resolved.input);
 
-    expect(bootstrap.initialTheme).toBe("github-dark-default");
+    expect(bootstrap.initialTheme).toBe("terminal");
   });
 });
 
@@ -1253,6 +1357,32 @@ describe("extension configuration", () => {
     expect(resolved.extensions.enabled).toBe(true);
     expect(resolved.extensions.paths).toEqual(["~/dev/copy-as.ts"]);
     expect(resolved.extensions.repoPaths).toEqual(["./tools/policy.ts"]);
+  });
+
+  test("unions normalized user and repository extension deny-lists", () => {
+    const home = createTempDir("hunk-config-home-");
+    const repo = createTempDir("hunk-config-repo-");
+    createRepo(repo);
+
+    mkdirSync(join(home, ".config", "hunk"), { recursive: true });
+    writeFileSync(
+      join(home, ".config", "hunk", "config.toml"),
+      ["[extensions]", 'disabled = [" hunk.gh ", "shared", "", "hunk.gh"]'].join("\n"),
+    );
+    mkdirSync(join(repo, ".hunk"), { recursive: true });
+    writeFileSync(
+      join(repo, ".hunk", "config.toml"),
+      ["[extensions]", 'disabled = ["shared", "repo-tool"]'].join("\n"),
+    );
+
+    const resolved = resolveConfiguredCliInput(createPatchPagerInput(), {
+      cwd: repo,
+      env: { HOME: home },
+    });
+
+    expect(resolved.extensions.userDisabled).toEqual(["hunk.gh", "shared"]);
+    expect(resolved.extensions.repoDisabled).toEqual(["shared", "repo-tool"]);
+    expect(resolved.extensions.disabled).toEqual(["hunk.gh", "shared", "repo-tool"]);
   });
 
   test("reads [keybindings] from the user layer only", () => {

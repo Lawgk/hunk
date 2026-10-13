@@ -9,6 +9,7 @@ import {
   parseCli,
   WATCH_OPTION,
 } from "./cli";
+import { readBundledSkillDocument } from "../core/run/paths";
 import { resolveCliVersion } from "../core/run/version";
 
 const tempDirs: string[] = [];
@@ -73,7 +74,7 @@ describe("parseCli", () => {
     expect(parsed.text).toContain("auto-reload when the current diff input changes");
     expect(parsed.text).toContain("--experimental");
     expect(parsed.text).toContain("experimental STML");
-    expect(parsed.text).toContain("--fast");
+    expect(parsed.text).not.toContain("--fast");
     expect(parsed.text).toContain("Git diff options:");
     expect(parsed.text).toContain("Notes:");
     expect(parsed.text).toContain(
@@ -133,6 +134,8 @@ describe("parseCli", () => {
       "notes.json",
       "--no-line-numbers",
       "-x4",
+      "--wheel-scroll-lines",
+      "3",
       "--wrap",
       "--no-hunk-headers",
       "--agent-notes",
@@ -153,12 +156,27 @@ describe("parseCli", () => {
         experimental: true,
         lineNumbers: false,
         tabWidth: 4,
+        wheelScrollLines: 3,
         wrapLines: true,
         hunkHeaders: false,
         agentNotes: true,
         transparentBackground: true,
       },
     });
+  });
+
+  test("parses wheel scroll lines and rejects invalid values", async () => {
+    const automatic = await parseCli(["bun", "hunk", "diff", "--wheel-scroll-lines", "auto"]);
+    const fixed = await parseCli(["bun", "hunk", "diff", "--wheel-scroll-lines", "5"]);
+
+    expect(automatic).toMatchObject({ kind: "vcs", options: { wheelScrollLines: "auto" } });
+    expect(fixed).toMatchObject({ kind: "vcs", options: { wheelScrollLines: 5 } });
+
+    for (const invalid of ["0", "11", "fast"]) {
+      await expect(
+        parseCli(["bun", "hunk", "diff", "--wheel-scroll-lines", invalid]),
+      ).rejects.toThrow(/wheel scroll lines/);
+    }
   });
 
   test("parses the current-line style and rejects an unknown one", async () => {
@@ -653,20 +671,35 @@ describe("parseCli", () => {
   test("prints skill help for hunk skill --help", async () => {
     const parsed = await parseCli(["bun", "hunk", "skill", "--help"]);
 
-    expect(parsed).toEqual({
-      kind: "help",
-      text: [
-        "Usage: hunk skill path [name]",
-        "",
-        "Print a bundled Hunk skill path.",
-        "Load or symlink that file in your coding agent to keep it in sync across Hunk upgrades.",
-        "",
-        "Skills:",
-        `  hunk-review (default, "review")   review a live Hunk session with \`hunk session\` commands`,
-        `  hunk-extensions ("extensions")    build extensions against the hunkdiff/extension API`,
-        "",
-      ].join("\n"),
-    });
+    expect(parsed.kind).toBe("help");
+    if (parsed.kind !== "help") {
+      throw new Error("Expected skill help output.");
+    }
+    expect(parsed.text).toContain("npx skills add modem-dev/hunk -g --skill hunk-review");
+    expect(parsed.text).not.toContain("hunk skill install");
+    expect(parsed.text).toContain("hunk skill show [skill]");
+    expect(parsed.text).toContain("hunk skill path [skill]");
+    expect(parsed.text).toContain(`  hunk-review (default, "review")`);
+  });
+
+  test("prints the bundled skill text for hunk skill show", async () => {
+    const parsed = await parseCli(["bun", "hunk", "skill", "show"]);
+    expect(parsed).toEqual({ kind: "help", text: readBundledSkillDocument("hunk-review") });
+
+    const named = await parseCli(["bun", "hunk", "skill", "show", "extensions"]);
+    expect(named).toEqual({ kind: "help", text: readBundledSkillDocument("hunk-extensions") });
+  });
+
+  test("rejects unsupported skill installation and invalid show arguments", async () => {
+    await expect(parseCli(["bun", "hunk", "skill", "install"])).rejects.toThrow(
+      "Supported skill subcommands are show and path.",
+    );
+    await expect(parseCli(["bun", "hunk", "skill", "show", "bogus"])).rejects.toThrow(
+      'Unknown skill "bogus".',
+    );
+    await expect(parseCli(["bun", "hunk", "skill", "show", "review", "extra"])).rejects.toThrow(
+      "accepts at most one skill name",
+    );
   });
 
   test("parses the daemon serve command", async () => {
@@ -1764,6 +1797,7 @@ describe("parseCli", () => {
       "extension",
       "ext",
       "update",
+      "completion",
       "daemon",
       "mcp",
     ]) {
@@ -1868,11 +1902,46 @@ describe("parseCli command help text", () => {
     );
   });
 
+  test("parses the daemon status and restart commands", async () => {
+    await expect(parseCli(["bun", "hunk", "daemon", "status"])).resolves.toEqual({
+      kind: "daemon-status",
+      output: "text",
+    });
+    await expect(parseCli(["bun", "hunk", "daemon", "status", "--json"])).resolves.toEqual({
+      kind: "daemon-status",
+      output: "json",
+    });
+    await expect(parseCli(["bun", "hunk", "daemon", "restart"])).resolves.toEqual({
+      kind: "daemon-restart",
+      output: "text",
+      yes: false,
+    });
+    await expect(
+      parseCli(["bun", "hunk", "daemon", "restart", "--yes", "--json"]),
+    ).resolves.toEqual({ kind: "daemon-restart", output: "json", yes: true });
+    await expect(parseCli(["bun", "hunk", "daemon", "status", "--yes"])).rejects.toThrow(
+      "Unknown option for `hunk daemon status`: --yes",
+    );
+    await expect(parseCli(["bun", "hunk", "daemon", "stop"])).rejects.toThrow(
+      "Only `hunk daemon serve`, `hunk daemon status`, and `hunk daemon restart` are supported.",
+    );
+  });
+
   test("renders the daemon overview and the daemon serve command help", async () => {
     const overview = await expectHelp(["daemon"]);
-    expect(overview).toContain("Usage: hunk daemon serve");
+    expect(overview).toContain("Usage: hunk daemon <subcommand>");
+    expect(overview).toContain("hunk daemon serve");
+    expect(overview).toContain("hunk daemon status [--json]");
+    expect(overview).toContain("hunk daemon restart [--yes]");
     expect(overview).toContain("HUNK_MCP_PORT");
     expect(overview).toBe(await expectHelp(["daemon", "--help"]));
+
+    expect(await expectHelp(["daemon", "status", "--help"])).toContain(
+      "Usage: hunk daemon status [--json]",
+    );
+    const restartHelp = await expectHelp(["daemon", "restart", "--help"]);
+    expect(restartHelp).toContain("Usage: hunk daemon restart [--yes] [--json]");
+    expect(restartHelp).toContain("--yes");
 
     expect(await expectHelp(["daemon", "serve", "--help"])).toContain(
       "Run the local Hunk session daemon and websocket session broker.",
@@ -1906,8 +1975,24 @@ describe("parseCli command help text", () => {
 
   test("renders skill help for both `skill --help` and `skill path --help`", async () => {
     const bare = await expectHelp(["skill", "--help"]);
-    expect(bare).toContain("Usage: hunk skill path");
+    expect(bare).toContain("hunk skill path [skill]");
     expect(await expectHelp(["skill", "path", "--help"])).toBe(bare);
+    expect(await expectHelp(["skill", "show", "--help"])).toBe(bare);
+  });
+
+  test("prints shell completion scripts and lists the command in top-level help", async () => {
+    expect(await expectHelp(["completion", "bash"])).toContain("complete -o default -F _hunk hunk");
+    expect(await expectHelp(["completion", "zsh"])).toStartWith("#compdef hunk");
+    expect(await expectHelp(["completion", "--help"])).toContain("bash, zsh");
+    expect(await expectHelp(["--help"])).toContain("hunk completion <bash|zsh>");
+  });
+
+  test("rejects a missing or unknown completion shell", async () => {
+    for (const tokens of [["completion"], ["completion", "fish"], ["completion", "bash", "zsh"]]) {
+      await expect(parseCli(["bun", "hunk", ...tokens])).rejects.toThrow(
+        "Usage: hunk completion <bash|zsh>",
+      );
+    }
   });
 
   test("renders the comment overview and per-comment-subcommand help", async () => {
@@ -1987,6 +2072,22 @@ describe("parseCli argument validation", () => {
     );
   });
 
+  test("parses scroll off and rejects values outside 0-40", async () => {
+    const parsed = await parseCli(["bun", "hunk", "diff", "--scroll-off", "5"]);
+
+    expect(parsed).toMatchObject({
+      kind: "vcs",
+      options: { scrollOff: 5 },
+    });
+
+    await expect(parseCli(["bun", "hunk", "diff", "--scroll-off", "41"])).rejects.toThrow(
+      "Invalid scroll off",
+    );
+    await expect(parseCli(["bun", "hunk", "diff", "--scroll-off", "abc"])).rejects.toThrow(
+      "Invalid scroll off",
+    );
+  });
+
   test("rejects an invalid layout mode and rethrows the parser error", async () => {
     await expect(parseCli(["bun", "hunk", "diff", "--mode", "bogus"])).rejects.toThrow(
       "Invalid layout mode: bogus",
@@ -2057,7 +2158,7 @@ describe("parseCli argument validation", () => {
 
   test("rejects unknown skill, daemon, stash, and comment subcommands", async () => {
     await expect(parseCli(["bun", "hunk", "skill", "bogus"])).rejects.toThrow(
-      "Only `hunk skill path` is supported.",
+      "Supported skill subcommands are show and path.",
     );
     await expect(parseCli(["bun", "hunk", "skill", "path", "bogus"])).rejects.toThrow(
       'Unknown skill "bogus". Bundled skills are hunk-review and hunk-extensions.',
@@ -2070,7 +2171,7 @@ describe("parseCli argument validation", () => {
       parseCli(["bun", "hunk", "skill", "path", "hunk-review", "extra"]),
     ).rejects.toThrow("`hunk skill path` accepts at most one skill name.");
     await expect(parseCli(["bun", "hunk", "daemon", "bogus"])).rejects.toThrow(
-      "Only `hunk daemon serve` is supported.",
+      "Only `hunk daemon serve`, `hunk daemon status`, and `hunk daemon restart` are supported.",
     );
     await expect(parseCli(["bun", "hunk", "stash", "bogus"])).rejects.toThrow(
       "Only `hunk stash show` is supported.",
@@ -2418,6 +2519,57 @@ describe("parseCli extension flags", () => {
     expect(parsed.options.extensionPaths).toEqual([first, second]);
   });
 
+  test("preserves ordered enable and disable overrides before or after a review command", async () => {
+    const parsed = await parseCli([
+      "bun",
+      "hunk",
+      "--disable-extension",
+      "hunk.gh",
+      "show",
+      "HEAD",
+      "--enable-extension=hunk.gh",
+      "--disable-extension",
+      "tool",
+    ]);
+
+    if (parsed.kind !== "show") {
+      throw new Error("Expected a show command.");
+    }
+
+    expect(parsed.options.extensionSelectionOverrides).toEqual([
+      { id: "hunk.gh", enabled: false },
+      { id: "hunk.gh", enabled: true },
+      { id: "tool", enabled: false },
+    ]);
+  });
+
+  test("does not read extension-selection-shaped pathspecs after --", async () => {
+    const parsed = await parseCli(["bun", "hunk", "diff", "--", "--disable-extension", "hunk.gh"]);
+
+    if (parsed.kind !== "vcs") {
+      throw new Error("Expected a VCS diff command.");
+    }
+    expect(parsed.pathspecs).toEqual(["--disable-extension", "hunk.gh"]);
+    expect(parsed.options.extensionSelectionOverrides).toBeUndefined();
+  });
+
+  test("carries leading selection overrides into extension CLI lookup", async () => {
+    const parsed = await parseCli([
+      "bun",
+      "hunk",
+      "--disable-extension=hunk.gh",
+      "gh",
+      "pr",
+      "123",
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: "extension-cli",
+      commandName: "gh",
+      extensionSelectionOverrides: [{ id: "hunk.gh", enabled: false }],
+    });
+  });
+
   test("documents the extension flags in top-level help", async () => {
     const parsed = await parseCli(["bun", "hunk"]);
 
@@ -2427,6 +2579,8 @@ describe("parseCli extension flags", () => {
 
     expect(parsed.text).toContain("--extension <path>");
     expect(parsed.text).toContain("--no-extensions");
+    expect(parsed.text).toContain("--disable-extension <id>");
+    expect(parsed.text).toContain("--enable-extension <id>");
   });
 });
 
@@ -2502,7 +2656,8 @@ describe("parseCli extension management commands", () => {
     expect(parsed.kind).toBe("help");
     if (parsed.kind === "help") {
       expect(parsed.text).toContain("hunk extension install <source>");
-      expect(parsed.text).toContain("only install repositories you trust");
+      expect(parsed.text).toContain("only install sources you trust");
+      expect(parsed.text).toContain("npm:<package>");
       expect(parsed.text).toContain("hunk-extension");
     }
 
@@ -2515,5 +2670,47 @@ describe("parseCli extension management commands", () => {
     expect(
       parseCli(["bun", "hunk", "session", "reload", "abc123", "--", "extension", "list"]),
     ).rejects.toThrow(/review command/);
+  });
+});
+
+describe("status command parsing", () => {
+  test("accepts static/JSON and preserves shared launch preferences", async () => {
+    expect(
+      await parseCli([
+        "bun",
+        "hunk",
+        "--experimental",
+        "--no-extensions",
+        "status",
+        "--json",
+        "--theme",
+        "nord",
+        "--no-line-numbers",
+      ]),
+    ).toMatchObject({
+      kind: "status",
+      json: true,
+      static: false,
+      color: "auto",
+      options: { experimental: true, extensions: false, theme: "nord", lineNumbers: false },
+    });
+    expect(await parseCli(["bun", "hunk", "status", "--static"])).toMatchObject({
+      kind: "status",
+      static: true,
+      json: false,
+    });
+  });
+  test("rejects revisions, bad color modes and nested session reload", async () => {
+    await expect(parseCli(["bun", "hunk", "status", "HEAD"])).rejects.toThrow();
+    await expect(parseCli(["bun", "hunk", "status", "--color", "rainbow"])).rejects.toThrow(
+      "Invalid color",
+    );
+    await expect(
+      parseCli(["bun", "hunk", "session", "reload", "session-test", "--", "status"]),
+    ).rejects.toThrow("review command");
+    expect(await parseCli(["bun", "hunk", "status", "--help"])).toMatchObject({
+      kind: "help",
+      text: expect.stringContaining("--json"),
+    });
   });
 });

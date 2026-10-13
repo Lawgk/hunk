@@ -1,11 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { parseDiffFromFile, parsePatchFiles } from "@pierre/diffs";
 import { createTwoFilesPatch } from "diff";
 import type { DiffFile } from "../../core/changeset/model";
 import {
   buildSplitRows,
   buildUnifiedRows,
-  HIGHLIGHT_WORKER_MIN_LINES,
   highlightedDiffLineCount,
   loadHighlightedDiff,
   shouldOffloadHighlight,
@@ -14,7 +13,7 @@ import {
   spansForHighlightedSourceLine,
   type DiffRow,
 } from "./diffRows";
-import { resolveSplitPaneWidths } from "./codeColumns";
+import { expandDiffTabs, resolveSplitPaneWidths } from "./codeColumns";
 import { renderCodeOnlyPlannedRowText, renderDecoratedPlannedRowText } from "./plannedRowText";
 import { unifiedCellPalette } from "./rowStyle";
 import { buildReviewRenderPlan } from "./reviewRenderPlan";
@@ -22,7 +21,12 @@ import { measureTextWidth } from "../lib/text";
 import { TRANSPARENT_BACKGROUND, resolveTheme } from "../themes";
 import { createTestSourceFetcher } from "../../../../../test/helpers/diff-helpers";
 import { createTestCustomThemes } from "../../../../../test/helpers/theme-helpers";
-import { registerHighlightWorker } from "./worker";
+import {
+  disposeHighlightWorker,
+  HIGHLIGHT_WORKER_PROTOCOL_VERSION,
+  registerHighlightWorker,
+} from "./worker";
+import { sanitizeTerminalLine } from "../../lib/terminalText";
 
 function createDiffFile(): DiffFile {
   const metadata = parseDiffFromFile(
@@ -125,7 +129,7 @@ function createElixirHeredocDiffFile(sourceFetcher?: DiffFile["sourceFetcher"]):
 }
 
 /** Build a changed TypeScript file at or above the interactive worker threshold. */
-function createWorkerEligibleDiffFile(generatedLineCount = HIGHLIGHT_WORKER_MIN_LINES): DiffFile {
+function createWorkerEligibleDiffFile(generatedLineCount = 40): DiffFile {
   const additions = Array.from(
     { length: generatedLineCount },
     (_, index) => `export const generated${index} = ${index};`,
@@ -157,7 +161,7 @@ function createWorkerEligibleDiffFile(generatedLineCount = HIGHLIGHT_WORKER_MIN_
 }
 
 /** Build a large partial source diff that must remap compact full-source ranges onto its patch. */
-function createLargeSourceBackedDiffFile(prefixLineCount = HIGHLIGHT_WORKER_MIN_LINES): DiffFile {
+function createLargeSourceBackedDiffFile(prefixLineCount = 40): DiffFile {
   const prefix = Array.from(
     { length: prefixLineCount },
     (_, index) => `  value${index} = ${index}`,
@@ -181,6 +185,10 @@ function createLargeSourceBackedDiffFile(prefixLineCount = HIGHLIGHT_WORKER_MIN_
     sourceFetcher: createTestSourceFetcher((side) => (side === "old" ? before : after)),
   };
 }
+
+afterAll(() => {
+  disposeHighlightWorker();
+});
 
 /** Register a worker double that reports a startup failure as soon as it receives work. */
 function registerFailingHighlightWorkerForTest() {
@@ -292,39 +300,32 @@ describe("Pierre diff rows", () => {
     expect(shouldHighlightDiff(createDiffFile())).toBe(true);
   });
 
-  test("offloads bundled-theme highlighting starting at 40 source lines", () => {
-    const eligible = createWorkerEligibleDiffFile(HIGHLIGHT_WORKER_MIN_LINES - 1);
-    const belowThreshold = createWorkerEligibleDiffFile(HIGHLIGHT_WORKER_MIN_LINES - 2);
+  test("offloads bundled-theme highlighting for any diff size when requested", () => {
+    const large = createWorkerEligibleDiffFile(40);
+    const tiny = createWorkerEligibleDiffFile(1);
     const theme = resolveTheme("github-dark-default", null);
 
-    expect(HIGHLIGHT_WORKER_MIN_LINES).toBe(40);
+    expect(shouldOffloadHighlight(large.metadata, theme, { offload: true })).toBe(true);
+    expect(shouldOffloadHighlight(tiny.metadata, theme, { offload: true })).toBe(true);
+    expect(shouldOffloadHighlight(large.metadata, theme, {})).toBe(false);
     expect(
-      Math.max(eligible.metadata.deletionLines.length, eligible.metadata.additionLines.length),
-    ).toBe(40);
-    expect(
-      Math.max(
-        belowThreshold.metadata.deletionLines.length,
-        belowThreshold.metadata.additionLines.length,
+      shouldOffloadHighlight(
+        large.metadata,
+        { ...theme, syntaxScopeOverrides: { keyword: "#112233" } },
+        { offload: true },
       ),
-    ).toBe(39);
-    expect(shouldOffloadHighlight(eligible.metadata, theme, { offloadLargeDiff: true })).toBe(true);
-    expect(shouldOffloadHighlight(belowThreshold.metadata, theme, { offloadLargeDiff: true })).toBe(
-      false,
-    );
-    expect(shouldOffloadHighlight(eligible.metadata, theme, { offloadLargeDiff: false })).toBe(
-      false,
-    );
+    ).toBe(false);
   });
 
   test("matches inline spans when an eligible bundled-theme diff uses the worker", async () => {
     const file = createWorkerEligibleDiffFile();
     const theme = resolveTheme("github-dark-default", null);
 
-    expect(shouldOffloadHighlight(file.metadata, theme, { offloadLargeDiff: true })).toBe(true);
+    expect(shouldOffloadHighlight(file.metadata, theme, { offload: true })).toBe(true);
 
     const [inline, offloaded] = await Promise.all([
       loadHighlightedDiff(file, theme),
-      loadHighlightedDiff(file, theme, { offloadLargeDiff: true }),
+      loadHighlightedDiff(file, theme, { offload: true }),
     ]);
     const inlineRows = buildSplitRows(file, inline, theme);
     const workerRows = buildSplitRows(file, offloaded, theme);
@@ -348,7 +349,7 @@ describe("Pierre diff rows", () => {
 
     const [inline, offloaded] = await Promise.all([
       loadHighlightedDiff(file, theme),
-      loadHighlightedDiff(file, theme, { offloadLargeDiff: true }),
+      loadHighlightedDiff(file, theme, { offload: true }),
     ]);
 
     expect(offloaded.compact?.deletionLineMap).toHaveLength(file.metadata.deletionLines.length);
@@ -396,14 +397,11 @@ describe("Pierre diff rows", () => {
   });
 
   test("matches inline context styling for a large patch-only diff", async () => {
-    const context = Array.from(
-      { length: HIGHLIGHT_WORKER_MIN_LINES },
-      (_, index) => `const gap${index} = ${index};`,
-    );
+    const context = Array.from({ length: 40 }, (_, index) => `const gap${index} = ${index};`);
     const before = [`const message = "closed";`, ...context, "const target = 1;", ""].join("\n");
     const after = ["const message = `open", ...context, "const target = 2;`", ""].join("\n");
     const patch = createTwoFilesPatch("state.ts", "state.ts", before, after, "", "", {
-      context: HIGHLIGHT_WORKER_MIN_LINES + 2,
+      context: 40 + 2,
     });
     const metadata = parsePatchFiles(patch, "large-patch-only-state", true)[0]?.files[0];
     if (!metadata) {
@@ -422,7 +420,7 @@ describe("Pierre diff rows", () => {
 
     const [inline, offloaded] = await Promise.all([
       loadHighlightedDiff(file, theme),
-      loadHighlightedDiff(file, theme, { offloadLargeDiff: true }),
+      loadHighlightedDiff(file, theme, { offload: true }),
     ]);
 
     expect(offloaded.compact).toBeDefined();
@@ -456,11 +454,51 @@ describe("Pierre diff rows", () => {
     const file = createWorkerEligibleDiffFile();
     const theme = resolveTheme("github-dark-default", null);
 
-    await expect(loadHighlightedDiff(file, theme, { offloadLargeDiff: true })).resolves.toEqual({
+    await expect(loadHighlightedDiff(file, theme, { offload: true })).resolves.toEqual({
       deletionLines: [],
       additionLines: [],
       retryable: true,
     });
+  });
+
+  test("renders permanently refused worker requests inline so the result is cached", async () => {
+    let workerCalls = 0;
+    const worker = {
+      onmessage: null as ((event: MessageEvent) => void) | null,
+      onerror: null as ((event: ErrorEvent) => void) | null,
+      postMessage(request: { id: number; kind: string }) {
+        workerCalls += 1;
+        queueMicrotask(() =>
+          this.onmessage?.({
+            data: {
+              version: HIGHLIGHT_WORKER_PROTOCOL_VERSION,
+              id: request.id,
+              kind: request.kind,
+              ok: false,
+              code: "unsupported-language",
+              retryable: false,
+              message: "unsupported",
+            },
+          } as MessageEvent),
+        );
+      },
+      terminate() {
+        return Promise.resolve(0);
+      },
+      unref() {},
+    };
+    registerHighlightWorker(worker as unknown as Worker);
+    const file = { ...createWorkerEligibleDiffFile(), language: "not-a-grammar" };
+    const theme = resolveTheme("github-dark-default", null);
+
+    try {
+      const highlighted = await loadHighlightedDiff(file, theme, { offload: true });
+      expect(workerCalls).toBe(1);
+      expect(highlighted.retryable).toBeUndefined();
+      expect(highlighted.additionLines.length).toBe(file.metadata.additionLines.length);
+    } finally {
+      disposeHighlightWorker();
+    }
   });
 
   test("uses full source to keep partial Elixir hunks inside the correct heredoc state", async () => {
@@ -749,7 +787,11 @@ describe("Pierre diff rows", () => {
     };
     const theme = resolveTheme("github-dark-default", null);
     const rows = buildSplitRows(file, null, theme);
-    const plannedRows = buildReviewRenderPlan({ fileId: file.id, rows, showHunkHeaders: true });
+    const plannedRows = buildReviewRenderPlan({
+      fileId: file.id,
+      rows,
+      showHunkHeaders: true,
+    });
     const changedRow = plannedRows.find(
       (row) =>
         row.kind === "diff-row" &&
@@ -886,15 +928,54 @@ describe("Pierre diff rows", () => {
       text,
       theme,
     });
-    const spans = spansForHighlightedSourceLine(
-      "export const hiddenMarker = true;",
-      highlighted.lines[0],
-      theme,
-    );
+    const spans = spansForHighlightedSourceLine("export const hiddenMarker = true;", highlighted);
 
     expect(spans.map((span) => span.text).join("")).toBe("export const hiddenMarker = true;");
     expect(spans.some((span) => span.text.includes("export") && typeof span.fg === "string")).toBe(
       true,
+    );
+  });
+
+  test("keeps expanded-source line ownership stable for lone carriage returns", async () => {
+    const file = createDiffFile();
+    const theme = resolveTheme("github-dark-default", null);
+    const highlighted = await loadHighlightedSourceLines({
+      file,
+      text: "const first = 1;\rconst second = 2;\n",
+      theme,
+    });
+
+    expect(highlighted).toEqual({
+      status: "fallback",
+      reason: "invalid-document",
+      retryable: false,
+    });
+    expect(
+      spansForHighlightedSourceLine("const first = 1;\rconst second = 2;", highlighted)
+        .map((span) => span.text)
+        .join(""),
+    ).toBe("const first = 1;const second = 2;");
+  });
+
+  test("projects expanded-source offsets before sanitizing and expanding tabs", async () => {
+    const file = createDiffFile();
+    const theme = resolveTheme("github-dark-default", null);
+    const rawLine = 'const\tlabel = "😀é界\u001b[31mred\u001b[0m";';
+    const highlighted = await loadHighlightedSourceLines({
+      file,
+      text: `${rawLine}\n`,
+      theme,
+    });
+    const spans = spansForHighlightedSourceLine(rawLine, highlighted, 4);
+    const expected = expandDiffTabs(sanitizeTerminalLine(rawLine), 4);
+
+    expect(spans.map((span) => span.text).join("")).toBe(expected);
+    expect(spans.some((span) => typeof span.fg === "string")).toBe(true);
+    expect(spans.every((span) => !span.text.includes("\u001b") && !span.text.includes("\t"))).toBe(
+      true,
+    );
+    expect(measureTextWidth(spans.map((span) => span.text).join(""))).toBe(
+      measureTextWidth(expected),
     );
   });
 
@@ -927,16 +1008,8 @@ describe("Pierre diff rows", () => {
       loadHighlightedSourceLines({ file, text, theme: firstTheme }),
       loadHighlightedSourceLines({ file, text, theme: secondTheme }),
     ]);
-    const firstSpans = spansForHighlightedSourceLine(
-      "// expanded comment",
-      firstHighlighted.lines[0],
-      firstTheme,
-    );
-    const secondSpans = spansForHighlightedSourceLine(
-      "// expanded comment",
-      secondHighlighted.lines[0],
-      secondTheme,
-    );
+    const firstSpans = spansForHighlightedSourceLine("// expanded comment", firstHighlighted);
+    const secondSpans = spansForHighlightedSourceLine("// expanded comment", secondHighlighted);
 
     expect(firstSpans[0]?.fg?.toLowerCase()).toBe("#abcdef");
     expect(secondSpans[0]?.fg?.toLowerCase()).toBe("#fedcba");
@@ -1021,6 +1094,10 @@ describe("Pierre diff rows", () => {
     expect(between).toBeDefined();
     expect(between?.oldRange).toEqual([9, 21]);
     expect(between?.newRange).toEqual([9, 21]);
+
+    const scopedRows = buildSplitRows(file, null, theme, undefined, new Set([1]));
+    expect(scopedRows.every((row) => row.hunkIndex === 1)).toBe(true);
+    expect(scopedRows.some((row) => row.type === "collapsed")).toBe(false);
   });
 
   test("passes exact Shiki scope colors through in dark and light", async () => {
@@ -1090,7 +1167,11 @@ describe("Pierre diff rows", () => {
 
   test("preserves base Shiki colors outside partial custom syntax overrides", async () => {
     const metadata = parseDiffFromFile(
-      { name: "partial.ts", contents: "const stable = 1;\n", cacheKey: "partial-before" },
+      {
+        name: "partial.ts",
+        contents: "const stable = 1;\n",
+        cacheKey: "partial-before",
+      },
       {
         name: "partial.ts",
         contents:
@@ -1247,7 +1328,11 @@ describe("Pierre diff rows", () => {
 
   test("uses Shiki's bundled Catppuccin theme for Catppuccin syntax", async () => {
     const metadata = parseDiffFromFile(
-      { name: "syntax.ts", contents: "const a = 1;\n", cacheKey: "catppuccin-before" },
+      {
+        name: "syntax.ts",
+        contents: "const a = 1;\n",
+        cacheKey: "catppuccin-before",
+      },
       {
         name: "syntax.ts",
         contents:

@@ -9,17 +9,34 @@ const harness = createPtyHarness();
 /** Give source loading and asynchronous Shiki highlighting enough headroom in CI. */
 setDefaultTimeout(20_000);
 
+/** Send one key and return how long the screen took to show `expected`, polling tightly. */
+async function timeKeyAnswer(
+  session: Awaited<ReturnType<ReturnType<typeof createPtyHarness>["launchHunk"]>>,
+  key: "pagedown" | "pageup",
+  expected: string,
+) {
+  const sent = performance.now();
+  session.sendKey(key);
+  while (performance.now() - sent < 2_000) {
+    if ((await session.text({ immediate: true })).includes(expected)) {
+      return performance.now() - sent;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`The ${key} key was not answered with ${JSON.stringify(expected)} in time.`);
+}
+
 afterEach(() => {
   harness.cleanup();
 });
 
-/** Create a contiguous added TypeScript file large enough to use the highlight worker. */
-function createLargeHighlightTestFiles() {
+/** Create contiguous added TypeScript lines for main-thread or worker highlighting. */
+function createHighlightTestFiles(lineCount: number) {
   const dir = mkdtempSync(join(tmpdir(), "hunk-highlight-worker-"));
   const before = join(dir, "before.ts");
   const after = join(dir, "after.ts");
   const contents = Array.from(
-    { length: 8_000 },
+    { length: lineCount },
     (_, index) => `export const workerLine${index} = ${index};`,
   ).join("\n");
   writeFileSync(before, "");
@@ -33,10 +50,82 @@ function visibleWorkerLineIndexes(snapshot: string) {
 }
 
 describe("PTY syntax highlighting", () => {
-  test("keeps key input responsive while a large added file highlights", async () => {
-    const fixture = createLargeHighlightTestFiles();
+  test("highlights a small diff using the main-thread WASM engine", async () => {
+    const fixture = createHighlightTestFiles(2);
+    try {
+      const session = await harness.launchHunk({
+        args: [
+          "diff",
+          "--theme",
+          "github-dark-default",
+          "--files",
+          fixture.before,
+          fixture.after,
+          "--mode",
+          "unified",
+        ],
+        cwd: fixture.dir,
+        cols: 100,
+        rows: 24,
+      });
+      await session.waitForText("export const workerLine0 = 0;");
+      let keywords = "";
+      for (let iteration = 0; iteration < 200; iteration += 1) {
+        await session.waitIdle({ timeout: 50 });
+        keywords = await session.text({ immediate: true, only: { foreground: "#ff7b72" } });
+        if (keywords.includes("export")) break;
+      }
+      expect(keywords).toContain("export");
+      session.close();
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("answers a key sent at first paint on a small multi-language review", async () => {
+    const fixture = harness.createSmallMultiLanguageRepoFixture();
     const session = await harness.launchHunk({
-      args: ["diff", "--files", fixture.before, fixture.after, "--fast", "--mode", "unified"],
+      args: ["diff", "--theme", "github-dark-default", "--mode", "unified"],
+      cwd: fixture.dir,
+      cols: 120,
+      rows: 24,
+    });
+
+    try {
+      await session.waitForText(fixture.firstPaintText, { timeout: 15_000 });
+      // Highlighting starts from an effect after the first paint; let it begin before the key.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const atFirstPaint = await timeKeyAnswer(session, "pagedown", fixture.belowFoldText);
+
+      let keywords = "";
+      for (let iteration = 0; iteration < 200; iteration += 1) {
+        await session.waitIdle({ timeout: 50 });
+        keywords = await session.text({ immediate: true, only: { foreground: "#ff7b72" } });
+        if (keywords.includes("return")) break;
+      }
+      expect(keywords).toContain("return");
+
+      // The settled answer calibrates the budget; inline compilation held the first 4-15x longer.
+      const settled = await timeKeyAnswer(session, "pageup", fixture.firstPaintText);
+      expect(atFirstPaint).toBeLessThan(Math.max(60, 4 * settled));
+    } finally {
+      session.close();
+    }
+  });
+
+  test("keeps key input responsive while a large added file highlights", async () => {
+    const fixture = createHighlightTestFiles(8_000);
+    const session = await harness.launchHunk({
+      args: [
+        "diff",
+        "--theme",
+        "github-dark-default",
+        "--files",
+        fixture.before,
+        fixture.after,
+        "--mode",
+        "unified",
+      ],
       cwd: fixture.dir,
       cols: 120,
       rows: 24,
@@ -79,7 +168,7 @@ describe("PTY syntax highlighting", () => {
   test("keeps code after a hidden Elixir heredoc opener out of the string token state", async () => {
     const fixture = harness.createElixirHeredocRepoFixture();
     const session = await harness.launchHunk({
-      args: ["diff", "--mode", "unified"],
+      args: ["diff", "--theme", "github-dark-default", "--mode", "unified"],
       cwd: fixture.dir,
       cols: 100,
       rows: 24,
